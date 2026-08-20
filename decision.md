@@ -756,3 +756,65 @@ request alongside quality, not quality alone.
 **Standing rule for this project.** On a metered tier, `max_tokens` is a cost
 parameter, not just a safety limit. Reasoning models multiply that cost even
 when the reasoning is unused.
+
+---
+
+## D-21 — Day 1 baseline results (70/70, 14/14 languages)
+
+Recorded so Day 2/3 changes can be measured against something concrete.
+Full per-question output in `data/smoke_results.json`.
+
+### Latency, median / p95 / max (ms)
+
+| Phase | med | p95 | max |
+|---|---|---|---|
+| embed | 32 | 41 | 45 |
+| search (Qdrant, RRF) | 493 | 665 | 713 |
+| rerank | 2,351 | 4,157 | 18,146 |
+| **retrieval total** | **2,879** | 4,670 | 18,671 |
+| **generation** | **6,986** | 14,136 | 29,705 |
+| **end to end** | **9,865** | 19,604 | 33,576 |
+
+**Generation dominates** (~71% of median). An earlier reading that the reranker
+was ~79% of latency was measured on retrieval *in isolation* and does not hold
+end to end. Qdrant search is consistently sub-second and is not a problem.
+
+Embedding at 32ms median confirms D-16's tradeoff was priced correctly: the
+MiniLM downgrade cost index-build time, not query latency.
+
+### Quality
+
+70/70 answered, 0 failures, retry used 3/70 (4%).
+
+| Strong (conf ≥ 0.65) | Weak (conf ≤ 0.55) |
+|---|---|
+| gu 0.80, pa 0.79, hi 0.78, ml 0.67, te 0.66, as 0.65, ta 0.65, ur 0.65, bn 0.64 | sa 0.59, ne 0.53, kn 0.50, mr 0.38, or 0.31 |
+
+**The low-resource gradient predicted in D-16 is real and measurable.** Citation
+rate tracks confidence almost exactly (or/mr 20%, kn/ne 40%, gu/hi/ml/pa 80%),
+which locates the problem in *retrieval*, not generation: when MiniLM-L12
+retrieves poor context the model correctly declines to cite it. 30/70 answers
+have no citations and 29/70 report confidence < 0.3 — these are largely the same
+questions, which is the system behaving honestly rather than fabricating.
+
+That is the single strongest argument for reversing D-16 first on Day 2.
+
+### Anomalies worth investigating
+
+1. **Odia generation 16.2s** (2.3× the mean) with the lowest confidence (0.31)
+   and citation rate (20%). Unexplained; check tokenisation and retrieved
+   context quality.
+2. **Sanskrit retrieval 6.7s** vs a 2.4–3.1s norm. Long compounds inflating
+   passage length is the obvious hypothesis, untested.
+3. **rerank max 18.1s** against a 2.4s median — a single outlier, consistent
+   with the transient free-tier degradation documented in D-18.
+
+### Day 2 priority order
+
+1. **Upgrade the dense model** (reverse D-16). `or`/`mr`/`kn` at 0.31–0.50 is
+   the clearest defect, embedding runs unattended, and `EmbeddingProvider` makes
+   it a config change. Preference: bge-m3 > e5-large > mpnet.
+2. **Then** voice. At ~10s median the pipeline is not usable for speech; fix
+   quality before adding a latency-sensitive interface on top of it.
+3. Backfill semantic chunking beyond the 3 languages currently indexed, and
+   compare the two strategies via the `strategy` filter (D-07).
