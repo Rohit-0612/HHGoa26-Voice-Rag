@@ -9,17 +9,39 @@ timing instrumentation in place for Day 2's voice + latency work.
 
 ---
 
-## Summary of changes from the original brief
+## Where Day 1 actually landed
 
-Three items in the original stack turned out to be non-viable. Each is
-documented in full below.
+**This table reflects the final shipped state.** Two entries reverse an earlier
+decision in this same document (D-16 supersedes D-06; D-20 supersedes D-09) --
+both reversals were forced by measurement, and both are written up in full
+rather than quietly edited away.
+
+| Layer | Shipped | Supersedes |
+|---|---|---|
+| Data loading | Direct parquet over `hf://`, validation split | D-01, D-02 |
+| Corpus | 200 rows x 14 langs -> 27,958 passages | D-04 |
+| Chunking | passage-native + semantic, registry interface | D-05 |
+| Dense | `paraphrase-multilingual-MiniLM-L12-v2` (384d) | **D-16** (was e5-large, D-06) |
+| Sparse | `Qdrant/bm25` (IDF modifier) | D-06, D-08b |
+| Fusion | server-side RRF | D-08 |
+| Rerank | `jina-reranker-v2-base-multilingual` | D-06 |
+| LLM | `openai/gpt-oss-20b`, max_tokens 1024 | **D-20** (was qwen3.6-27b, D-09) |
+| Vector DB | Qdrant Cloud free tier, 1 collection, on-disk vectors | D-07, D-14 |
+
+### Changes forced by the original brief being non-viable
 
 | Brief said | Reality | Now |
 |---|---|---|
-| Load per-language configs | Dataset has no per-language configs; loader script is broken | Direct parquet over `hf://` (D-01, D-02) |
-| bge-m3 dense+sparse via FastEmbed | FastEmbed ships neither | multilingual-e5-large + BM25 (D-06) |
-| bge-reranker-v2-m3 via FastEmbed | Not in FastEmbed's cross-encoder list | jina-reranker-v2-base-multilingual (D-06) |
-| Groq `llama-3.1-8b-instant` | Shut down 2026-08-16 | `qwen/qwen3.6-27b` (D-09) |
+| Load per-language configs | No per-language configs exist; the repo's loader script points at `.jsonl` files that were replaced by parquet | Direct parquet over `hf://` (D-01, D-02) |
+| bge-m3 dense+sparse via FastEmbed | FastEmbed ships neither | BM25 + a multilingual dense model (D-06, D-16) |
+| bge-reranker-v2-m3 via FastEmbed | Not in FastEmbed's cross-encoder list | `jina-reranker-v2-base-multilingual` (D-06) |
+| Groq `llama-3.1-8b-instant` | Shut down 2026-08-16, two days before this build | `openai/gpt-oss-20b` (D-09, then D-20) |
+
+### Day 1 result
+
+70/70 smoke questions, 14/14 languages, 0 failures. Median 9.9s end to end
+(generation 71%). Confidence ranges 0.31 (Odia) to 0.80 (Gujarati) -- the
+low-resource gradient predicted in D-16. Full numbers in D-21.
 
 ---
 
@@ -818,3 +840,55 @@ That is the single strongest argument for reversing D-16 first on Day 2.
    quality before adding a latency-sensitive interface on top of it.
 3. Backfill semantic chunking beyond the 3 languages currently indexed, and
    compare the two strategies via the `strategy` filter (D-07).
+
+---
+
+## D-22 — FastEmbed 0.8.0 changed MiniLM's pooling; the version is load-bearing
+
+**Observed.** Every run emits:
+
+> `UserWarning: The model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+> now uses mean pooling instead of CLS embedding. In order to preserve the
+> previous behaviour, consider either pinning fastembed version to 0.5.1 or
+> using add_custom_model functionality.`
+
+**Why it is recorded rather than silenced.** Mean pooling is the correct choice
+for this model (it is how `sentence-transformers` trained and serves it), so the
+current behaviour is right and no action is needed today.
+
+But it means **the FastEmbed version is part of the index's identity.** Vectors
+built under 0.8.0 are not comparable to vectors built under ≤0.5.1 for this
+model. Since queries and documents both go through `FastEmbedProvider`, an
+index built on one version and queried from another would silently degrade --
+no error, just worse results, which is the failure mode this project has
+already been bitten by twice (D-08b, D-18).
+
+**Mitigation in place.** `pyproject.toml` pins `qdrant-client[fastembed]>=1.12.0`,
+which is not tight enough to guarantee this. The embedding cache
+(`data/embeddings_*.pkl`, D-17) records `dense_model` and `dense_dim`, and
+`build_index.py` refuses a cache whose dimension disagrees with settings -- but
+dimension is unchanged by a pooling switch, so that guard would **not** catch
+this particular hazard.
+
+**Action for Day 2.** Either pin `fastembed==0.8.0` exactly, or record the
+fastembed version in the cache alongside the model name and check it on load.
+The second is better: it turns a silent quality regression into a loud failure.
+
+**Alternatives considered.** Pin to 0.5.1 to preserve CLS pooling -- rejected,
+since CLS is the wrong pooling for this model and we would be freezing a bug.
+
+---
+
+## D-23 — Sarvam AI reserved for Day 2 voice
+
+`SARVAM_API_KEY` is present in `.env` / `.env.example` but unused on Day 1.
+
+Sarvam is an Indic-specialist STT/TTS provider, which matters here: Whisper
+(available on Groq as `whisper-large-v3`) has uneven coverage of Assamese,
+Odia, and Sanskrit -- the same low-resource languages already identified as this
+system's weak point in D-16 and confirmed by measurement in D-21. Using a
+general-purpose STT model would compound an existing weakness rather than sit
+orthogonally to it.
+
+Decision deferred to Day 2, when both can be measured on the same audio. Noting
+it now so the key's presence in `.env` is not mistaken for dead configuration.
