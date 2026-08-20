@@ -9,17 +9,39 @@ timing instrumentation in place for Day 2's voice + latency work.
 
 ---
 
-## Summary of changes from the original brief
+## Where Day 1 actually landed
 
-Three items in the original stack turned out to be non-viable. Each is
-documented in full below.
+**This table reflects the final shipped state.** Two entries reverse an earlier
+decision in this same document (D-16 supersedes D-06; D-20 supersedes D-09) --
+both reversals were forced by measurement, and both are written up in full
+rather than quietly edited away.
+
+| Layer | Shipped | Supersedes |
+|---|---|---|
+| Data loading | Direct parquet over `hf://`, validation split | D-01, D-02 |
+| Corpus | 200 rows x 14 langs -> 27,958 passages | D-04 |
+| Chunking | passage-native + semantic, registry interface | D-05 |
+| Dense | `paraphrase-multilingual-MiniLM-L12-v2` (384d) | **D-16** (was e5-large, D-06) |
+| Sparse | `Qdrant/bm25` (IDF modifier) | D-06, D-08b |
+| Fusion | server-side RRF | D-08 |
+| Rerank | `jina-reranker-v2-base-multilingual` | D-06 |
+| LLM | `openai/gpt-oss-20b`, max_tokens 1024 | **D-20** (was qwen3.6-27b, D-09) |
+| Vector DB | Qdrant Cloud free tier, 1 collection, on-disk vectors | D-07, D-14 |
+
+### Changes forced by the original brief being non-viable
 
 | Brief said | Reality | Now |
 |---|---|---|
-| Load per-language configs | Dataset has no per-language configs; loader script is broken | Direct parquet over `hf://` (D-01, D-02) |
-| bge-m3 dense+sparse via FastEmbed | FastEmbed ships neither | multilingual-e5-large + BM25 (D-06) |
-| bge-reranker-v2-m3 via FastEmbed | Not in FastEmbed's cross-encoder list | jina-reranker-v2-base-multilingual (D-06) |
-| Groq `llama-3.1-8b-instant` | Shut down 2026-08-16 | `qwen/qwen3.6-27b` (D-09) |
+| Load per-language configs | No per-language configs exist; the repo's loader script points at `.jsonl` files that were replaced by parquet | Direct parquet over `hf://` (D-01, D-02) |
+| bge-m3 dense+sparse via FastEmbed | FastEmbed ships neither | BM25 + a multilingual dense model (D-06, D-16) |
+| bge-reranker-v2-m3 via FastEmbed | Not in FastEmbed's cross-encoder list | `jina-reranker-v2-base-multilingual` (D-06) |
+| Groq `llama-3.1-8b-instant` | Shut down 2026-08-16, two days before this build | `openai/gpt-oss-20b` (D-09, then D-20) |
+
+### Day 1 result
+
+70/70 smoke questions, 14/14 languages, 0 failures. Median 9.9s end to end
+(generation 71%). Confidence ranges 0.31 (Odia) to 0.80 (Gujarati) -- the
+low-resource gradient predicted in D-16. Full numbers in D-21.
 
 ---
 
@@ -174,9 +196,9 @@ gain on this corpus, and punkt has no models for most of these 14 languages.
 ---
 
 ## D-06 — Embedding + reranking models: the bge-m3 substitution
-> **Status: dense choice SUPERSEDED by [D-16](#d-16). Sparse (BM25) and the
-> reranker still stand.** The reasoning below for *why* bge-m3 was unavailable
-> remains accurate and is why the `EmbeddingProvider` indirection exists.
+> **Status: dense choice SUPERSEDED by D-16. Sparse (BM25) and the reranker
+> still stand.** The reasoning below for *why* bge-m3 was unavailable remains
+> accurate, and is why the `EmbeddingProvider` indirection exists.
 
 **This is the largest deviation from the brief.**
 
@@ -338,10 +360,10 @@ which matters for both latency and citation precision.
 ---
 
 ## D-09 — Groq model: `qwen/qwen3.6-27b`
-> **Status: SUPERSEDED by [D-20](#d-20).** Choosing a *reasoning* model here
-> forced `max_tokens=4096`, which exhausted Groq's token-per-minute budget and
-> caused the failure cascade in D-18. Kept in full because the reasoning below
-> looked sound and still failed — that is the point.
+> **Status: SUPERSEDED by D-20.** Choosing a *reasoning* model here forced
+> `max_tokens=4096`, which exhausted Groq's token-per-minute budget and caused
+> the failure cascade in D-18. Kept in full because the reasoning below looked
+> sound and still failed — that is the point.
 
 **Chosen.** `qwen/qwen3.6-27b`, configurable via `GROQ_MODEL`.
 
@@ -496,21 +518,6 @@ smoke-test numbers to mean anything.
 
 ---
 
-## Known limitations (Day 1)
-
-1. **Corpus is a toy.** 200 query rows/language proves the pipeline, not
-   retrieval quality. Do not quote benchmark numbers off it.
-2. **Not bge-m3.** See D-06. Low-resource sparse retrieval (`as`, `or`, `sa`) is
-   the weakest link, and BM25 is the reason.
-3. **Semantic chunking is indexed for a subset of languages only,** for time.
-   The interface and the code path are exercised; full coverage is a Day-2 backfill.
-4. **No evaluation harness.** No recall@k, no MRR, no groundedness metric. The
-   dataset's `is_selected` flag marks gold passages and is already carried
-   through to the payload — that is the hook for Day 3's recall@k.
-5. **`confidence` is model self-report,** not a calibrated probability. Useful
-   for relative ranking within a run; not a real probability.
-
----
 
 ## D-16 — Dense model changed again, under measurement: MiniLM-L12
 
@@ -593,3 +600,317 @@ model swap would silently produce a collection with mismatched vectors.
 **Alternative.** Embed straight into the upsert loop (the original design).
 Simpler and less disk, but serialises two independent bottlenecks and re-pays
 ~25 min on every retry.
+
+---
+
+## D-18 — Failure handling, learned from four smoke-test runs
+
+The first smoke test crashed at question 23. Three more runs each failed
+differently, and each exposed a distinct design flaw worth recording, because
+all three are the same category of mistake: **treating a transport failure as a
+content failure.**
+
+### Run 1 (23/70) — provider errors escaped the retry
+
+Groq's server-side JSON validator returned `400 json_validate_failed` with an
+empty `failed_generation` (qwen3.6 spending its whole budget on reasoning
+tokens). D-10's retry caught `JSONDecodeError` and `ValidationError` but not
+`groq.BadRequestError`, so it propagated and 500'd `/query` — despite D-10
+explicitly claiming the endpoint never 500s over a formatting failure.
+
+**Fix.** The first attempt now catches broadly. The retry also **drops
+`response_format`**: retrying with the same server-side constraint just
+reproduces the same 400, so the retry leans on the prompt plus `_extract_json`
+instead. A retry that repeats the failing condition is not a retry.
+
+### Run 2 (24/70) — Qdrant free tier drops TLS handshakes
+
+`ResponseHandlingException: _ssl.c:993: The handshake operation timed out`. The
+0.5 vCPU cluster becomes unresponsive under sustained query load.
+
+**Fix.** `_query_with_retry` wraps searches with 3 attempts and backoff. Also,
+the smoke test no longer dies on one bad question — it records the error and
+continues, then reports what failed. A run that aborts at question 24 yields
+nothing; one that completes with six failures yields 64 data points *and* names
+the problem. This is the same tolerance already applied per-language in
+`prepare_data.py`, and it should have been applied here from the start.
+
+### Run 3 (40/70) — rate limits recorded as bad answers
+
+The worst of the three, because it produced *plausible numbers instead of an
+error*. After ~10 sustained requests Groq's free tier began returning
+`RateLimitError`. That was caught by the parse-failure path, "retried" with a
+sterner prompt (which cannot fix a 429), then written off as the
+`confidence: 0.0` fallback.
+
+The per-language table showed `as` 0.42, `bn` 0.85, then **every subsequent
+language at exactly 0.00**. Read naively, that says the system cannot answer
+Gujarati, Hindi, Kannada, Malayalam, Marathi or Nepali at all. It says nothing
+of the kind — those requests never reached the model.
+
+**Fix.** `_call_with_backoff` handles `RateLimitError` separately, honouring the
+`retry-after` header when present and backing off exponentially otherwise. A
+test asserts a 429 does **not** count as a parse retry, so the two paths cannot
+be conflated again.
+
+**Lesson worth keeping.** A pipeline that degrades silently to a low-confidence
+answer is dangerous precisely because the output still looks like data. Every
+degraded path must be distinguishable from a genuine low-confidence answer.
+
+### Run 4 (0/70) — a retry I added made things worse
+
+Every request timed out. `get_client()` used `timeout=120` (chosen for slow bulk
+upserts), and Run 2's fix wrapped queries in 3 retries — so a hung cluster
+stalled a single request for up to **360 seconds**, far past the client's 180s
+timeout. Nothing reached the server at all.
+
+**Fix.** `get_client(timeout=...)` is now a parameter. Bulk indexing keeps 120s;
+the API and smoke test pass **20s**, so retries fail fast and stay bounded.
+
+**Lesson.** Adding a retry without lowering the per-attempt timeout multiplies
+worst-case latency instead of improving reliability. Retry count and timeout are
+one decision, not two.
+
+---
+
+## D-19 — Free-tier capacity is the binding constraint, not model choice
+
+Measured across the runs above:
+
+| Limit | Symptom | Bound |
+|---|---|---|
+| Qdrant 0.5 vCPU | TLS handshake timeouts | ~sustained query load |
+| Groq free tier | `RateLimitError` | ~10 sustained requests |
+
+Per-question latency of 5–35s is dominated by these, not by the embedding model
+or the reranker. This reframes D-16: swapping MiniLM back to a larger model
+costs *index* time, not *query* time, so the quality compromise made there buys
+much less than it appeared to at the time and should be reconsidered early on
+Day 2.
+
+**Implication for Day 2 (voice).** A 5–35s round trip is unusable for speech.
+Before any STT/TTS work, one of these must change:
+
+1. Paid Qdrant cluster (~$25/mo) — removes the handshake failures.
+2. Groq paid tier — removes the request cap.
+3. `openai/gpt-oss-20b` instead of qwen — measured at 0.6s vs 1.0–2.8s, and
+   production tier rather than preview.
+4. Drop rerank candidates 20 → 10 — saves ~1s, free, small recall cost.
+
+(3) and (4) are free and should be measured first.
+
+---
+
+## D-20 — D-09 reversed: `gpt-oss-20b`, not qwen. The reasoning model was the bug.
+
+**Chosen.** `openai/gpt-oss-20b` with `MAX_TOKENS=1024`, replacing
+`qwen/qwen3.6-27b` at 4096.
+
+**This supersedes D-09, and D-09's reasoning was the root cause of a long chain
+of failures.**
+
+### What actually happened
+
+D-09 chose qwen for stronger Indic coverage. qwen3.6 is a *reasoning* model, so
+D-10 raised `max_tokens` to 4096 to leave room for thinking tokens (a 1024 cap
+truncated output to a bare `{`).
+
+On Groq's free tier, **`max_tokens` counts against the token-per-minute budget
+whether or not the tokens are generated.** Every RAG request therefore billed
+~4096 output tokens on top of a ~2,000-token prompt (five Indic passages).
+The TPM budget was exhausted after roughly ten requests.
+
+That is the "rate limited after ~10 sustained requests" symptom recorded in
+D-18/D-19. It was attributed there to generic free-tier throttling. It was not
+generic — it was a direct, avoidable consequence of pairing a reasoning model
+with a large context on a metered tier.
+
+### Measured, same corpus, same prompts
+
+| | qwen3.6-27b @ 4096 | gpt-oss-20b @ 1024 |
+|---|---|---|
+| Generation latency | 81s, then failed | **0.7 – 1.0s** |
+| Outcome | `RateLimitError`, conf 0.0 | conf **0.95**, 2 real citations |
+| Billed output tokens/req | ~4096 | ~1024 |
+
+The Indic-quality concern that motivated D-09 did not materialise: Hindi and
+Tamil both answered correctly, in the correct script, at 0.95 confidence.
+
+### The diagnostic failure, recorded deliberately
+
+Four fixes were applied before finding this — a Qdrant search retry, a
+`get_client(timeout=)` parameter, rate-limit backoff, then a cap on that
+backoff. Each was a real improvement and all are kept. **None addressed the
+cause.** Every one treated a symptom one layer below a model choice made hours
+earlier.
+
+Two habits would have found it immediately:
+
+1. **Isolate every component before fixing anything.** Timing embed / Qdrant /
+   rerank / Groq separately took ten minutes and immediately showed all four
+   were fast individually — which falsified the infrastructure theories that had
+   already consumed several fix cycles.
+2. **Test the real payload.** Short probe prompts succeeded and made Groq look
+   healthy. The failure only reproduced with a genuine ~2,000-token RAG prompt.
+   A probe that does not resemble production traffic is not a test of production.
+
+### Alternatives
+
+- *Keep qwen, cut `max_tokens`.* Truncates its reasoning; produces the bare-`{`
+  failure from D-10.
+- *Keep qwen, shrink context (top_k 5 → 3).* Reduces prompt tokens but not the
+  4096 output reservation, which is the dominant term.
+- *Paid Groq tier.* Would have hidden the problem rather than fixed it — the
+  request was ~4× larger than it needed to be regardless of tier.
+
+**Revisit.** If Day-3 evaluation shows weak generation on low-resource languages
+(`as`, `or`, `sa`, `ne`), compare `openai/gpt-oss-120b` — but measure tokens per
+request alongside quality, not quality alone.
+
+**Standing rule for this project.** On a metered tier, `max_tokens` is a cost
+parameter, not just a safety limit. Reasoning models multiply that cost even
+when the reasoning is unused.
+
+---
+
+## D-21 — Day 1 baseline results (70/70, 14/14 languages)
+
+Recorded so Day 2/3 changes can be measured against something concrete.
+Full per-question output in `data/smoke_results.json`.
+
+### Latency, median / p95 / max (ms)
+
+| Phase | med | p95 | max |
+|---|---|---|---|
+| embed | 32 | 41 | 45 |
+| search (Qdrant, RRF) | 493 | 665 | 713 |
+| rerank | 2,351 | 4,157 | 18,146 |
+| **retrieval total** | **2,879** | 4,670 | 18,671 |
+| **generation** | **6,986** | 14,136 | 29,705 |
+| **end to end** | **9,865** | 19,604 | 33,576 |
+
+**Generation dominates** (~71% of median). An earlier reading that the reranker
+was ~79% of latency was measured on retrieval *in isolation* and does not hold
+end to end. Qdrant search is consistently sub-second and is not a problem.
+
+Embedding at 32ms median confirms D-16's tradeoff was priced correctly: the
+MiniLM downgrade cost index-build time, not query latency.
+
+### Quality
+
+70/70 answered, 0 failures, retry used 3/70 (4%).
+
+| Strong (conf ≥ 0.65) | Weak (conf ≤ 0.55) |
+|---|---|
+| gu 0.80, pa 0.79, hi 0.78, ml 0.67, te 0.66, as 0.65, ta 0.65, ur 0.65, bn 0.64 | sa 0.59, ne 0.53, kn 0.50, mr 0.38, or 0.31 |
+
+**The low-resource gradient predicted in D-16 is real and measurable.** Citation
+rate tracks confidence almost exactly (or/mr 20%, kn/ne 40%, gu/hi/ml/pa 80%),
+which locates the problem in *retrieval*, not generation: when MiniLM-L12
+retrieves poor context the model correctly declines to cite it. 30/70 answers
+have no citations and 29/70 report confidence < 0.3 — these are largely the same
+questions, which is the system behaving honestly rather than fabricating.
+
+That is the single strongest argument for reversing D-16 first on Day 2.
+
+### Anomalies worth investigating
+
+1. **Odia generation 16.2s** (2.3× the mean) with the lowest confidence (0.31)
+   and citation rate (20%). Unexplained; check tokenisation and retrieved
+   context quality.
+2. **Sanskrit retrieval 6.7s** vs a 2.4–3.1s norm. Long compounds inflating
+   passage length is the obvious hypothesis, untested.
+3. **rerank max 18.1s** against a 2.4s median — a single outlier, consistent
+   with the transient free-tier degradation documented in D-18.
+
+### Day 2 priority order
+
+1. **Upgrade the dense model** (reverse D-16). `or`/`mr`/`kn` at 0.31–0.50 is
+   the clearest defect, embedding runs unattended, and `EmbeddingProvider` makes
+   it a config change. Preference: bge-m3 > e5-large > mpnet.
+2. **Then** voice. At ~10s median the pipeline is not usable for speech; fix
+   quality before adding a latency-sensitive interface on top of it.
+3. Backfill semantic chunking beyond the 3 languages currently indexed, and
+   compare the two strategies via the `strategy` filter (D-07).
+
+---
+
+## D-22 — FastEmbed 0.8.0 changed MiniLM's pooling; the version is load-bearing
+
+**Observed.** Every run emits:
+
+> `UserWarning: The model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+> now uses mean pooling instead of CLS embedding. In order to preserve the
+> previous behaviour, consider either pinning fastembed version to 0.5.1 or
+> using add_custom_model functionality.`
+
+**Why it is recorded rather than silenced.** Mean pooling is the correct choice
+for this model (it is how `sentence-transformers` trained and serves it), so the
+current behaviour is right and no action is needed today.
+
+But it means **the FastEmbed version is part of the index's identity.** Vectors
+built under 0.8.0 are not comparable to vectors built under ≤0.5.1 for this
+model. Since queries and documents both go through `FastEmbedProvider`, an
+index built on one version and queried from another would silently degrade --
+no error, just worse results, which is the failure mode this project has
+already been bitten by twice (D-08b, D-18).
+
+**Mitigation in place.** `pyproject.toml` pins `qdrant-client[fastembed]>=1.12.0`,
+which is not tight enough to guarantee this. The embedding cache
+(`data/embeddings_*.pkl`, D-17) records `dense_model` and `dense_dim`, and
+`build_index.py` refuses a cache whose dimension disagrees with settings -- but
+dimension is unchanged by a pooling switch, so that guard would **not** catch
+this particular hazard.
+
+**Action for Day 2.** Either pin `fastembed==0.8.0` exactly, or record the
+fastembed version in the cache alongside the model name and check it on load.
+The second is better: it turns a silent quality regression into a loud failure.
+
+**Alternatives considered.** Pin to 0.5.1 to preserve CLS pooling -- rejected,
+since CLS is the wrong pooling for this model and we would be freezing a bug.
+
+---
+
+## D-23 — Sarvam AI reserved for Day 2 voice
+
+`SARVAM_API_KEY` is present in `.env` / `.env.example` but unused on Day 1.
+
+Sarvam is an Indic-specialist STT/TTS provider, which matters here: Whisper
+(available on Groq as `whisper-large-v3`) has uneven coverage of Assamese,
+Odia, and Sanskrit -- the same low-resource languages already identified as this
+system's weak point in D-16 and confirmed by measurement in D-21. Using a
+general-purpose STT model would compound an existing weakness rather than sit
+orthogonally to it.
+
+Decision deferred to Day 2, when both can be measured on the same audio. Noting
+it now so the key's presence in `.env` is not mistaken for dead configuration.
+
+---
+
+## Known limitations (Day 1) — revised after measurement
+
+An earlier version of this list blamed BM25 for the low-resource weakness.
+D-21's measurement does not support that, so it is corrected here rather than
+left standing.
+
+1. **Corpus is a toy.** 200 query rows/language (27,958 passages) proves the
+   pipeline, not retrieval quality. Do not quote benchmark numbers off it.
+2. **Low-resource languages are materially worse, and the dense model is the
+   cause — not sparse.** Measured: Odia 0.31, Marathi 0.38, Kannada 0.50 against
+   Gujarati 0.80, Punjabi 0.79 (D-21). Citation rate tracks confidence almost
+   exactly, which places the gap in retrieval. MiniLM-L12 (384d, D-16) is the
+   documented compromise and the first thing to reverse on Day 2.
+3. **Semantic chunking is indexed for 3 languages only** (hi, bn, ta — 1,624
+   chunks). The interface, the `strategy` payload filter and the code path are
+   all verified; full coverage is a Day-2 backfill.
+4. **No evaluation harness.** No recall@k, no MRR, no groundedness metric.
+   Confidence and citation rate are proxies, not metrics. The dataset's
+   `is_selected` flag marks gold passages and is carried through to the payload
+   — that is the hook for Day 3's recall@k.
+5. **`confidence` is model self-report,** not a calibrated probability. Useful
+   for relative ranking within a run; not a real probability.
+6. **Free-tier capacity shaped several decisions** (D-19, D-20). Some would be
+   made differently on paid infrastructure and should be re-examined rather
+   than inherited.
+7. **FastEmbed version is unpinned but load-bearing** (D-22). An index built
+   under a different version is silently incomparable.
