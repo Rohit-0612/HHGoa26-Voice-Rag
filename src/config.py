@@ -77,7 +77,11 @@ class Settings(BaseSettings):
     # all 14 languages (NOT the 6-query sample that first suggested 0.0 -- that
     # blocked 66% of real traffic). At -1.5: 1.8% of real queries blocked, 5/6
     # off-topic caught. See decision.md D-29.
-    relevance_threshold: float = -1.5
+    # -2.0, not -1.5: a real Kannada corpus query scored -1.51 and was wrongly
+    # blocked. False positives are unrecoverable (user gets nothing) while false
+    # negatives are caught downstream -- the LLM refuses, then groundedness
+    # replaces. Both verified. Bias permissive. See D-31.
+    relevance_threshold: float = -2.0
 
     # ---- Guardrail: post-generation groundedness ----
     groundedness_sentence_threshold: float = 0.35
