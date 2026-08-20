@@ -914,3 +914,203 @@ left standing.
    than inherited.
 7. **FastEmbed version is unpinned but load-bearing** (D-22). An index built
    under a different version is silently incomparable.
+
+---
+---
+
+# Day 2 — Voice, guardrails, fallback, benchmarking
+
+---
+
+## D-24 — The pre-retrieval centroid guardrail does not work. Measured, not assumed.
+
+**The brief specified** a pre-retrieval off-topic check: build corpus centroids
+offline, and if a query's similarity to the nearest centroid falls below a
+threshold, short-circuit before retrieval and generation.
+
+**It was built, measured, and it does not separate on-topic from off-topic.**
+
+### The measurement
+
+16 centroids over all 27,958 cached embeddings, then scored 14 real in-corpus
+queries (one per language) against 8 deliberately off-topic ones:
+
+| | nearest-centroid similarity |
+|---|---|
+| in-corpus queries | min **0.340**, median 0.497 |
+| off-topic queries | max **0.708**, median 0.355 |
+
+There is no threshold that separates these. Concretely:
+
+| Query | Score |
+|---|---|
+| "நாளை வானிலை எப்படி இருக்கும்?" (Tamil: tomorrow's weather — off-topic) | **0.708** |
+| "asdkjh qwe zxcvbnm" (gibberish) | 0.446 |
+| "ஒரு நிறுவனம் என்பது என்ன?" (Tamil: what is a corporation — **real corpus query**) | 0.340 |
+
+An off-topic Tamil question outscores a real Tamil question by a wide margin.
+
+### Why
+
+With 14 languages in one embedding space, **k-means finds language clusters,
+not topic clusters.** MiniLM-L12's 384 dimensions are dominated by
+script/language identity; topic is a weak secondary signal. So the guard
+answers "is this one of our scripts?" rather than "is this about our corpus?"
+
+The per-language rejection rates at the p5 threshold make this concrete — the
+same global threshold rejects wildly different fractions by language:
+
+| as | bn | kn | ta | hi | ur | mr | gu |
+|---|---|---|---|---|---|---|---|
+| 0.0% | 0.0% | 0.2% | 0.2% | **21.4%** | **16.7%** | **14.1%** | **11.3%** |
+
+A global threshold is therefore also a **language-fairness bug**: it would
+silently reject one in five Hindi queries while never rejecting Assamese.
+
+Z-score normalising per cluster (to remove the language confound) improved the
+ordering but still overlapped — off-topic max +0.09 against in-corpus min −3.22.
+
+### What was shipped instead
+
+Two gates, with honest labels (`src/guardrails/scope.py`):
+
+1. **`ScopeGuard`** — the specified pre-retrieval centroid check, kept because it
+   is nearly free (~15ms) and does catch egregious garbage. Threshold defaulted
+   to a deliberately permissive **0.15** so it almost never rejects a real query.
+   It is explicitly *not* trusted as the only defence.
+2. **`RelevanceGate`** — a post-retrieval gate on the top cross-encoder score.
+   This separates cleanly, because a reranker is *trained* on query-document
+   relevance:
+
+   | | top rerank score |
+   |---|---|
+   | in-corpus | min **+0.452**, median +0.646 |
+   | off-topic | max **−0.309**, median −1.909 |
+
+   Threshold 0.0 sits in the measured gap.
+
+**The cost of moving the gate later is small.** It fires before generation,
+which Day 1 measured at ~71% of end-to-end latency. Verified live: off-topic
+queries return with `generation_ms = 0`.
+
+### Alternatives rejected
+
+- *Tune the centroid threshold harder.* The distributions overlap; no threshold
+  exists. This is a property of the embedding space, not of the constant.
+- *Per-language centroids and thresholds.* Removes the confound but requires
+  knowing the language before retrieval — which for the voice path depends on
+  STT, and for the text path is exactly what we do not know.
+- *An LLM classifier call.* Accurate, but adds a network round trip to every
+  query to save a network round trip on some queries.
+- *A better embedding model.* Genuinely would help — D-16's MiniLM downgrade is
+  implicated here too. Day 3.
+
+**Standing lesson.** A guardrail that is never measured against the thing it is
+supposed to catch is decoration. This one would have shipped looking plausible,
+with a threshold derived from a real percentile, and silently rejected 21% of
+Hindi traffic while waving through off-topic Tamil.
+
+---
+
+## D-25 — Sarvam's language codes disagree with the corpus, and the failure is silent
+
+**Chosen.** `to_corpus_language()` in `src/stt/sarvam.py` normalises BCP-47 to
+corpus codes, and returns `None` for anything it cannot map.
+
+**Why it needs care.** Sarvam returns BCP-47 (`hi-IN`) where the corpus indexes
+bare ISO-639-1 (`hi`), so a naive `code.split("-")[0]` looks correct. It is not:
+
+- Sarvam writes Odia as **`od-IN`**; the corpus uses **`or`**. Truncation yields
+  `od`, which matches no indexed language, so a `language="od"` filter returns
+  **zero results** — and the pipeline would report "no relevant context" for
+  every Odia voice query while looking healthy.
+- Sarvam's documented list does not cover Assamese, Nepali, Sanskrit or Urdu,
+  all of which are indexed.
+
+**The `None` contract is the important part.** `None` means *do not filter*.
+Searching all 14 languages returns something useful; filtering to a wrong or
+non-existent language returns nothing, or worse, confident results from the
+wrong language. Unmappable input must widen the search, never narrow it.
+`en-IN` also maps to `None` — the corpus has no English.
+
+Six tests pin this, including all three Odia spellings.
+
+---
+
+## D-26 — Provider fallback: Groq primary, NIM fallback, per-provider breakers
+
+**Chosen.** `ChainedGenerator` over an `LLMProvider` protocol, with a
+`CircuitBreaker` per provider.
+
+**Why a breaker and not just a try/except chain.** Day 1 measured what an
+unhealthy provider costs: an exhausted Groq quota turned every request into an
+81-second stall before failing. A plain fallback chain pays that stall on
+*every* request. The breaker pays it `failure_threshold` times, then skips the
+provider outright until a cooldown elapses.
+
+Verified live against both real APIs with a deliberately invalid Groq key:
+
+| call | provider used | groq circuit | groq called? |
+|---|---|---|---|
+| 1 | nim | closed (1 fail) | yes |
+| 2 | nim | closed (2 fails) | yes |
+| 3 | nim | **open** (3 fails) | yes |
+| 4 | nim | open | **skipped** |
+
+NIM is OpenAI-compatible, so it reuses the `openai` SDK with a different
+`base_url` rather than a second client implementation. It is slower (measured
+5.8s vs Groq's 0.9s), which is the right ordering for a fallback.
+
+**Design note.** `generate()` keeps its exact Day 1 signature so the API and all
+39 Day 1 tests were untouched by this refactor; `generate_detailed()` is the new
+surface that reports which provider answered.
+
+**Alternatives.** Round-robin or latency-based routing — better for throughput,
+but non-deterministic, and a hackathon demo benefits more from "the fast one,
+unless it's broken". Retry-only with no fallback — Day 1 already proved that
+degrades to zero-confidence answers when a provider is genuinely down.
+
+---
+
+## D-27 — Two chunking strategies added with zero interface change
+
+`FixedSizeChunking` and `SentenceWindowChunking` were added to
+`src/ingestion/chunking.py` with the `@register` decorator and **no edits to
+`ChunkingStrategy`, the indexer, or the retriever** — the Day 1 D-05 claim,
+now actually cashed in.
+
+One extension was needed, and it is in the payload rather than the interface:
+`sentence_window` embeds a single sentence but the LLM must read the surrounding
+window, so `meta["parent_text"]` travels into the Qdrant payload and
+`RetrievedChunk.context_text` returns it. **The retrieval unit and the
+generation unit are deliberately different things** — a lone sentence embeds to
+a tight, matchable vector but is too thin to answer from.
+
+Rerank and groundedness both operate on `context_text`, so all three stages
+agree on what the "document" is.
+
+Measured expansion over 2,000 passages: `passage_native` 2,000 →
+`fixed_size` 2,196 → `semantic` ~2,700 → `sentence_window` **6,566** (3.3×).
+That cost is what the recall@5 comparison has to justify.
+
+---
+
+## D-28 — A separate collection for the chunking comparison
+
+**Chosen.** All four strategies indexed into `msmarco_xi_eval` over an identical
+frozen 2,000-passage subset (`data/eval_subset.jsonl`), rather than reusing the
+production collection.
+
+**Why.** The production collection holds `passage_native` over all 27,958
+passages. Comparing that against new strategies covering 2,000 would measure
+**distractor count, not chunking quality** — `passage_native` would look worse
+purely for having 14× more competition. Identical corpora is the entire point of
+a controlled comparison.
+
+The subset spans `hi`/`bn`/`ta`/`or`, chosen to straddle Day 1's measured
+quality range (0.78 / 0.64 / 0.65 / 0.31) so the comparison is not read only off
+the languages that already work.
+
+**Stated limitation.** 500 passages/language means few distractors, so absolute
+recall reads optimistically. Only the relative ordering is meaningful, and
+`data/chunking_eval.md` says so in the output rather than only here.
