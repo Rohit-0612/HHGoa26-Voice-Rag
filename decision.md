@@ -1114,3 +1114,99 @@ the languages that already work.
 **Stated limitation.** 500 passages/language means few distractors, so absolute
 recall reads optimistically. Only the relative ordering is meaningful, and
 `data/chunking_eval.md` says so in the output rather than only here.
+
+---
+
+## D-29 — The relevance threshold was calibrated on 6 queries and blocked 66% of real traffic
+
+**A repeat of D-24's mistake, made while fixing D-24.**
+
+D-24 replaced the failed centroid guard with a post-retrieval rerank gate and
+set its threshold to **0.0**, justified by a measured gap: in-corpus min +0.452
+against off-topic max −0.309.
+
+That measurement used **six** in-corpus queries. It was not representative.
+
+Re-measured on **56 real queries across all 14 languages**:
+
+| | top rerank score |
+|---|---|
+| Real queries | min **−1.572**, p5 −1.242, median **−0.292** |
+| Off-topic | max −0.441, median −1.905 |
+
+The real-query median is *negative*. A threshold of 0.0 blocks **66%** of
+legitimate traffic. The full benchmark confirmed it in production: **63 of 112
+real corpus queries were returned as "out of scope."**
+
+And it failed unevenly by language, exactly as the centroid guard did:
+
+| sa | as | or | te | bn | gu | ml | hi |
+|---|---|---|---|---|---|---|---|
+| 88% | 75% | 75% | 75% | 62% | 62% | 62% | **25%** |
+
+### Threshold sweep (56 real, 6 off-topic)
+
+| Threshold | Real blocked | Off-topic caught |
+|---|---|---|
+| 0.0 | **66.1%** | 6/6 |
+| −0.5 | 30.4% | 5/6 |
+| −1.0 | 8.9% | 5/6 |
+| **−1.5** | **1.8%** | **5/6** |
+| −2.0 | 0.0% | 3/6 |
+
+**Shipped: −1.5.** It gives up one off-topic catch (an off-topic Tamil question
+at −0.441, which genuinely overlaps the real-query range) to stop rejecting
+one in every 1.5 real queries.
+
+### Why this happened twice
+
+Both times the threshold was set from a handful of hand-picked probes and the
+numbers looked convincing. Six queries cannot characterise a distribution
+spanning 14 languages whose per-language means range from +0.122 (Marathi) to
+−0.853 (Sanskrit).
+
+**Rule adopted:** a threshold that gates production traffic must be calibrated
+on a sample that covers every language, and reported as a false-positive rate
+against real traffic — never as "there is a gap between these two small sets."
+
+The benchmark caught this only because it logged `blocked` per query. Had it
+reported latency alone, the system would have looked fast *because* it was
+refusing most of its work.
+
+---
+
+## D-30 — The dumb chunking baseline won
+
+recall@5 over 32 held-out queries, all four strategies indexed over identical
+passages in `msmarco_xi_eval`:
+
+| Strategy | recall@5 | hi | bn | ta | or | index size |
+|---|---|---|---|---|---|---|
+| **`fixed_size`** | **0.781** | 0.88 | 0.62 | 0.88 | 0.75 | 2,196 |
+| `passage_native` | 0.750 | 0.88 | 0.62 | 0.75 | 0.75 | 2,000 |
+| `sentence_window` | 0.688 | — | — | — | — | **6,566** |
+| `semantic` | 0.656 | 0.88 | 0.50 | 0.88 | 0.38 | 2,720 |
+
+Fixed-size character windows with overlap — the strategy included specifically
+as a baseline for the others to beat — came first. `sentence_window` cost
+**3.3× the index** and finished third. `semantic`, the most elaborate, finished
+last, dragged down by Odia (0.38).
+
+**Statistical honesty:** n=32, so the standard error is ~0.077. The gap between
+`fixed_size` and `passage_native` (0.031) is **well inside noise** and must not
+be reported as a win. The gap to `semantic` (0.125) is ~1.6 SE — suggestive,
+not conclusive. The defensible claim is narrow: **no sophisticated strategy
+demonstrated an advantage over the simple ones, and one of them cost 3.3× the
+storage to not do so.**
+
+**Why plausible.** MSMARCO passages are already human-curated retrieval units of
+roughly the right size (D-05), so passage-native is a strong baseline by
+construction and fixed-size windows approximate it. Semantic chunking's
+breakpoint detection relies on the same 384d MiniLM embeddings that D-16
+flagged as weak on low-resource languages — its worst language is Odia, the
+same language Day 1 measured worst overall (0.31). The chunker is likely being
+blamed for the embedder.
+
+**Action for Day 3:** re-run this comparison after upgrading the dense model.
+Semantic chunking may be losing for a reason that has nothing to do with
+chunking.

@@ -73,9 +73,11 @@ class Settings(BaseSettings):
     # Pre-retrieval centroid guard is measured-weak (D-24); default it permissive
     # so it only catches egregious garbage, and rely on relevance_threshold.
     scope_threshold: float | None = 0.15
-    # Post-retrieval cross-encoder gate. In-corpus min was +0.452, off-topic max
-    # -0.309, so 0.0 sits in the measured gap.
-    relevance_threshold: float = 0.0
+    # Post-retrieval cross-encoder gate. Calibrated on 56 real queries across
+    # all 14 languages (NOT the 6-query sample that first suggested 0.0 -- that
+    # blocked 66% of real traffic). At -1.5: 1.8% of real queries blocked, 5/6
+    # off-topic caught. See decision.md D-29.
+    relevance_threshold: float = -1.5
 
     # ---- Guardrail: post-generation groundedness ----
     groundedness_sentence_threshold: float = 0.35
