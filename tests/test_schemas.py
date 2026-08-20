@@ -101,3 +101,79 @@ def test_normalisation_does_not_rescue_a_genuinely_fake_id():
     out = ans.drop_hallucinated_citations({"hi::1::0"})
     assert out.citations == []
     assert out.confidence == 0.3
+
+
+# ---- regression: provider errors must not escape as 500s ----
+async def test_provider_error_falls_back_instead_of_raising():
+    """groq.BadRequestError(json_validate_failed) is exactly what the retry
+    exists for; before this fix it propagated and 500'd /query."""
+    from src.generation.generator import GroqGenerator
+
+    gen = GroqGenerator.__new__(GroqGenerator)
+    gen.model = "test"
+
+    calls = []
+
+    async def boom(messages, force_json=True):
+        calls.append(force_json)
+        raise RuntimeError("Error code: 400 - json_validate_failed")
+
+    gen._call = boom
+    ans, ms, retry = await gen.generate("q", [_C("hi::1::0")])
+
+    assert retry is True
+    assert ans.confidence == 0.0          # degraded, not raised
+    assert ans.citations == []
+    assert calls == [True, False]         # retry drops the JSON constraint
+
+
+async def test_retry_recovers_and_keeps_valid_citation():
+    from src.generation.generator import GroqGenerator
+
+    gen = GroqGenerator.__new__(GroqGenerator)
+    gen.model = "test"
+    state = {"n": 0}
+
+    async def flaky(messages, force_json=True):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise RuntimeError("400 json_validate_failed")
+        return '{"answer":"ok","citations":["chunk_id: hi::1::0"],"confidence":0.9}'
+
+    gen._call = flaky
+    ans, ms, retry = await gen.generate("q", [_C("hi::1::0")])
+    assert retry is True
+    assert ans.answer == "ok"
+    assert ans.citations == ["hi::1::0"]
+    assert ans.confidence == 0.9
+
+
+async def test_rate_limit_is_retried_with_backoff_not_a_sterner_prompt():
+    """A 429 is a transport problem. Re-prompting cannot fix it; waiting can."""
+    import groq
+    import httpx
+
+    from src.generation.generator import GroqGenerator
+
+    gen = GroqGenerator.__new__(GroqGenerator)
+    gen.model = "test"
+    state = {"n": 0}
+
+    def _rate_limit_error():
+        req = httpx.Request("POST", "https://api.groq.com/v1/chat/completions")
+        resp = httpx.Response(429, headers={"retry-after": "0"}, request=req)
+        return groq.RateLimitError("rate limited", response=resp, body=None)
+
+    async def flaky(messages, force_json=True):
+        state["n"] += 1
+        if state["n"] <= 2:
+            raise _rate_limit_error()
+        return '{"answer":"ok","citations":["hi::1::0"],"confidence":0.8}'
+
+    gen._call = flaky
+    ans, ms, retry = await gen.generate("q", [_C("hi::1::0")])
+
+    assert state["n"] == 3            # two 429s waited out, third succeeded
+    assert retry is False             # backoff is not the parse-failure retry
+    assert ans.answer == "ok"
+    assert ans.confidence == 0.8

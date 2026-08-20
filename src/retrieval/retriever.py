@@ -62,7 +62,7 @@ class HybridRetriever:
         flt = self._filter(language, strategy)
 
         t0 = time.perf_counter()
-        resp = self.client.query_points(
+        resp = self._query_with_retry(
             collection_name=settings.qdrant_collection,
             prefetch=[
                 models.Prefetch(query=dense_vec, using=DENSE, limit=candidates, filter=flt),
@@ -88,6 +88,19 @@ class HybridRetriever:
             for p in resp.points
         ]
         return chunks, timing
+
+    def _query_with_retry(self, *, retries: int = 3, **kwargs):
+        """Qdrant Cloud's free tier (0.5 vCPU) intermittently drops the TLS
+        handshake under sustained load. A transient network failure should cost
+        a retry, not the whole request."""
+        last = None
+        for attempt in range(retries):
+            try:
+                return self.client.query_points(**kwargs)
+            except Exception as exc:
+                last = exc
+                time.sleep(1.5 * (attempt + 1))
+        raise last
 
     def _rerank(self, query: str, chunks: list[RetrievedChunk], top_k: int):
         if not chunks:

@@ -48,7 +48,7 @@ async def run_inprocess(questions, top_k):
     from src.retrieval.retriever import FastEmbedReranker, HybridRetriever
 
     print("Loading models ...", flush=True)
-    retriever = HybridRetriever(get_client(), FastEmbedProvider(), FastEmbedReranker())
+    retriever = HybridRetriever(get_client(timeout=20), FastEmbedProvider(), FastEmbedReranker())
     generator = GroqGenerator()
     print("Ready.\n", flush=True)
 
@@ -78,17 +78,29 @@ async def run_inprocess(questions, top_k):
     return results
 
 
-async def run_http(questions, top_k, base):
+async def run_http(questions, top_k, base, pause=0.0):
+    """One failed question must not kill a 70-question run -- the free-tier
+    Qdrant cluster drops connections intermittently under sustained load."""
     import httpx
 
-    results = []
-    async with httpx.AsyncClient(timeout=120) as http:
+    results, failures = [], []
+    async with httpx.AsyncClient(timeout=180) as http:
         for lang, items in questions.items():
             for item in items:
-                r = await http.post(f"{base}/query",
-                                    json={"text": item["query"], "language": lang, "top_k": top_k})
-                r.raise_for_status()
-                d = r.json()
+                try:
+                    r = await http.post(
+                        f"{base}/query",
+                        json={"text": item["query"], "language": lang, "top_k": top_k},
+                    )
+                    r.raise_for_status()
+                    d = r.json()
+                except Exception as exc:
+                    failures.append({"language": lang, "query": item["query"],
+                                     "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+                    print(f"  [{lang}] {item['query'][:55]:<55}   FAILED  "
+                          f"{type(exc).__name__}", flush=True)
+                    continue
+
                 results.append({"language": lang, "query": item["query"], "gold": item["gold"],
                                 "answer": d["answer"], "citations": d["citations"],
                                 "confidence": d["confidence"], "retry_used": d.get("retry_used"),
@@ -96,10 +108,20 @@ async def run_http(questions, top_k, base):
                                 "top_chunk_ids": [c["chunk_id"] for c in d.get("contexts", [])]})
                 print(f"  [{lang}] {item['query'][:55]:<55} "
                       f"{d['timing']['total_ms']:7.0f}ms  conf={d['confidence']:.2f}", flush=True)
+                if pause:
+                    await asyncio.sleep(pause)
+
+    if failures:
+        print(f"\n{len(failures)} question(s) failed:")
+        for f in failures:
+            print(f"  [{f['language']}] {f['error']}")
     return results
 
 
 def report(results):
+    if not results:
+        print("\nNo successful results to report.")
+        return
     print("\n" + "=" * 100)
     print("PER-QUESTION RESULTS")
     print("=" * 100)
@@ -151,6 +173,8 @@ def main() -> int:
     ap.add_argument("--top-k", type=int, default=settings.top_k)
     ap.add_argument("--http", action="store_true")
     ap.add_argument("--base", default="http://localhost:8000")
+    ap.add_argument("--pause", type=float, default=0.5,
+                    help="seconds between questions; eases load on the free-tier cluster")
     args = ap.parse_args()
 
     langs = set(args.langs) if args.langs else set(LANGS)
@@ -161,7 +185,7 @@ def main() -> int:
     print(f"Running {sum(len(v) for v in questions.values())} questions "
           f"across {len(questions)} languages\n")
 
-    runner = run_http(questions, args.top_k, args.base) if args.http else \
+    runner = run_http(questions, args.top_k, args.base, args.pause) if args.http else \
         run_inprocess(questions, args.top_k)
     results = asyncio.run(runner)
 

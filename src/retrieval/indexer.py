@@ -25,7 +25,7 @@ def point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(NAMESPACE, chunk_id))
 
 
-def get_client() -> QdrantClient:
+def get_client(timeout: int = 120) -> QdrantClient:
     if not settings.qdrant_url or not settings.qdrant_api_key:
         raise RuntimeError(
             "QDRANT_URL / QDRANT_API_KEY missing. Copy .env.example to .env and fill them in."
@@ -33,7 +33,10 @@ def get_client() -> QdrantClient:
     return QdrantClient(
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
-        timeout=120,       # free tier is 0.5 vCPU; upserts can be slow
+        # Bulk upserts need a long timeout; queries must NOT inherit it. With a
+        # 3-attempt retry wrapper, a 120s per-attempt timeout means a hung
+        # cluster stalls a request for 6 minutes. Query paths pass ~20s.
+        timeout=timeout,
         prefer_grpc=False,
     )
 

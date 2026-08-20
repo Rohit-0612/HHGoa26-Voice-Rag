@@ -586,3 +586,101 @@ model swap would silently produce a collection with mismatched vectors.
 **Alternative.** Embed straight into the upsert loop (the original design).
 Simpler and less disk, but serialises two independent bottlenecks and re-pays
 ~25 min on every retry.
+
+---
+
+## D-18 — Failure handling, learned from four smoke-test runs
+
+The first smoke test crashed at question 23. Three more runs each failed
+differently, and each exposed a distinct design flaw worth recording, because
+all three are the same category of mistake: **treating a transport failure as a
+content failure.**
+
+### Run 1 (23/70) — provider errors escaped the retry
+
+Groq's server-side JSON validator returned `400 json_validate_failed` with an
+empty `failed_generation` (qwen3.6 spending its whole budget on reasoning
+tokens). D-10's retry caught `JSONDecodeError` and `ValidationError` but not
+`groq.BadRequestError`, so it propagated and 500'd `/query` — despite D-10
+explicitly claiming the endpoint never 500s over a formatting failure.
+
+**Fix.** The first attempt now catches broadly. The retry also **drops
+`response_format`**: retrying with the same server-side constraint just
+reproduces the same 400, so the retry leans on the prompt plus `_extract_json`
+instead. A retry that repeats the failing condition is not a retry.
+
+### Run 2 (24/70) — Qdrant free tier drops TLS handshakes
+
+`ResponseHandlingException: _ssl.c:993: The handshake operation timed out`. The
+0.5 vCPU cluster becomes unresponsive under sustained query load.
+
+**Fix.** `_query_with_retry` wraps searches with 3 attempts and backoff. Also,
+the smoke test no longer dies on one bad question — it records the error and
+continues, then reports what failed. A run that aborts at question 24 yields
+nothing; one that completes with six failures yields 64 data points *and* names
+the problem. This is the same tolerance already applied per-language in
+`prepare_data.py`, and it should have been applied here from the start.
+
+### Run 3 (40/70) — rate limits recorded as bad answers
+
+The worst of the three, because it produced *plausible numbers instead of an
+error*. After ~10 sustained requests Groq's free tier began returning
+`RateLimitError`. That was caught by the parse-failure path, "retried" with a
+sterner prompt (which cannot fix a 429), then written off as the
+`confidence: 0.0` fallback.
+
+The per-language table showed `as` 0.42, `bn` 0.85, then **every subsequent
+language at exactly 0.00**. Read naively, that says the system cannot answer
+Gujarati, Hindi, Kannada, Malayalam, Marathi or Nepali at all. It says nothing
+of the kind — those requests never reached the model.
+
+**Fix.** `_call_with_backoff` handles `RateLimitError` separately, honouring the
+`retry-after` header when present and backing off exponentially otherwise. A
+test asserts a 429 does **not** count as a parse retry, so the two paths cannot
+be conflated again.
+
+**Lesson worth keeping.** A pipeline that degrades silently to a low-confidence
+answer is dangerous precisely because the output still looks like data. Every
+degraded path must be distinguishable from a genuine low-confidence answer.
+
+### Run 4 (0/70) — a retry I added made things worse
+
+Every request timed out. `get_client()` used `timeout=120` (chosen for slow bulk
+upserts), and Run 2's fix wrapped queries in 3 retries — so a hung cluster
+stalled a single request for up to **360 seconds**, far past the client's 180s
+timeout. Nothing reached the server at all.
+
+**Fix.** `get_client(timeout=...)` is now a parameter. Bulk indexing keeps 120s;
+the API and smoke test pass **20s**, so retries fail fast and stay bounded.
+
+**Lesson.** Adding a retry without lowering the per-attempt timeout multiplies
+worst-case latency instead of improving reliability. Retry count and timeout are
+one decision, not two.
+
+---
+
+## D-19 — Free-tier capacity is the binding constraint, not model choice
+
+Measured across the runs above:
+
+| Limit | Symptom | Bound |
+|---|---|---|
+| Qdrant 0.5 vCPU | TLS handshake timeouts | ~sustained query load |
+| Groq free tier | `RateLimitError` | ~10 sustained requests |
+
+Per-question latency of 5–35s is dominated by these, not by the embedding model
+or the reranker. This reframes D-16: swapping MiniLM back to a larger model
+costs *index* time, not *query* time, so the quality compromise made there buys
+much less than it appeared to at the time and should be reconsidered early on
+Day 2.
+
+**Implication for Day 2 (voice).** A 5–35s round trip is unusable for speech.
+Before any STT/TTS work, one of these must change:
+
+1. Paid Qdrant cluster (~$25/mo) — removes the handshake failures.
+2. Groq paid tier — removes the request cap.
+3. `openai/gpt-oss-20b` instead of qwen — measured at 0.6s vs 1.0–2.8s, and
+   production tier rather than preview.
+4. Drop rerank candidates 20 → 10 — saves ~1s, free, small recall cost.
+
+(3) and (4) are free and should be measured first.

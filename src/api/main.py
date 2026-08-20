@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
     print("Loading reranker ...")
     reranker = FastEmbedReranker()
     print("Connecting to Qdrant ...")
-    client = get_client()
+    client = get_client(timeout=20)  # query path: fail fast, let the retry handle it
 
     STATE["retriever"] = HybridRetriever(client, provider, reranker)
     STATE["client"] = client

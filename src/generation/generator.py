@@ -70,15 +70,48 @@ class GroqGenerator:
         self.client = AsyncGroq(api_key=key)
         self.model = model or settings.groq_model
 
-    async def _call(self, messages) -> str:
+    async def _call_with_backoff(self, messages, force_json: bool = True, retries: int = 4) -> str:
+        """Rate limiting is a *transport* problem, not a formatting problem.
+
+        Retrying it with a sterner prompt (the parse-failure path) is useless --
+        it needs waiting. Groq reports the wait in `retry_after`; honour it when
+        present and fall back to exponential backoff when not.
+        """
+        import asyncio as _a
+
+        from groq import RateLimitError
+
+        last: Exception | None = None
+        for attempt in range(retries):
+            try:
+                return await self._call(messages, force_json=force_json)
+            except RateLimitError as exc:
+                last = exc
+                wait = getattr(getattr(exc, "response", None), "headers", {}) or {}
+                delay = float(wait.get("retry-after", 0) or 0) or min(2 ** attempt, 8)
+                await _a.sleep(delay)
+        raise last
+
+    async def _call(self, messages, force_json: bool = True) -> str:
+        """`force_json` toggles Groq's server-side JSON validation.
+
+        That validator can itself 400 with `json_validate_failed` and an empty
+        `failed_generation` -- typically when a reasoning model spends its whole
+        budget thinking and emits nothing parseable. Retrying with the same
+        constraint just reproduces it, so the retry drops the constraint and
+        leans on the prompt plus `_extract_json` instead.
+        """
+        kwargs = {}
+        if force_json:
+            kwargs["response_format"] = {"type": "json_object"}
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             temperature=0.2,
             max_tokens=settings.max_tokens,
-            response_format={"type": "json_object"},
+            **kwargs,
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content or ""
 
     async def generate(self, question: str, chunks) -> tuple[RAGAnswer, float, bool]:
         """Returns (answer, generation_ms, retry_used)."""
@@ -94,14 +127,17 @@ class GroqGenerator:
 
         retry_used = False
         try:
-            answer = RAGAnswer(**_extract_json(await self._call(messages)))
-        except (json.JSONDecodeError, ValidationError, TypeError, KeyError) as exc:
+            answer = RAGAnswer(**_extract_json(await self._call_with_backoff(messages)))
+        except Exception as exc:
+            # Deliberately broad: as well as parse failures this catches
+            # groq.BadRequestError(json_validate_failed), which is the exact
+            # condition the retry exists for. Letting it escape 500s the API.
             # One retry, with the actual parse error fed back to the model.
             retry_used = True
             try:
                 answer = RAGAnswer(
                     **_extract_json(
-                        await self._call(
+                        await self._call_with_backoff(
                             [
                                 {"role": "system", "content": SYSTEM},
                                 {"role": "user", "content": user},
@@ -109,7 +145,8 @@ class GroqGenerator:
                                     "role": "system",
                                     "content": RETRY_SYSTEM.format(error=str(exc)[:200]),
                                 },
-                            ]
+                            ],
+                            force_json=False,
                         )
                     )
                 )
