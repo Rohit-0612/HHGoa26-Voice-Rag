@@ -174,6 +174,9 @@ gain on this corpus, and punkt has no models for most of these 14 languages.
 ---
 
 ## D-06 — Embedding + reranking models: the bge-m3 substitution
+> **Status: dense choice SUPERSEDED by [D-16](#d-16). Sparse (BM25) and the
+> reranker still stand.** The reasoning below for *why* bge-m3 was unavailable
+> remains accurate and is why the `EmbeddingProvider` indirection exists.
 
 **This is the largest deviation from the brief.**
 
@@ -335,6 +338,10 @@ which matters for both latency and citation precision.
 ---
 
 ## D-09 — Groq model: `qwen/qwen3.6-27b`
+> **Status: SUPERSEDED by [D-20](#d-20).** Choosing a *reasoning* model here
+> forced `max_tokens=4096`, which exhausted Groq's token-per-minute budget and
+> caused the failure cascade in D-18. Kept in full because the reasoning below
+> looked sound and still failed — that is the point.
 
 **Chosen.** `qwen/qwen3.6-27b`, configurable via `GROQ_MODEL`.
 
