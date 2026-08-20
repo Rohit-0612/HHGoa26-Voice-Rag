@@ -684,3 +684,75 @@ Before any STT/TTS work, one of these must change:
 4. Drop rerank candidates 20 → 10 — saves ~1s, free, small recall cost.
 
 (3) and (4) are free and should be measured first.
+
+---
+
+## D-20 — D-09 reversed: `gpt-oss-20b`, not qwen. The reasoning model was the bug.
+
+**Chosen.** `openai/gpt-oss-20b` with `MAX_TOKENS=1024`, replacing
+`qwen/qwen3.6-27b` at 4096.
+
+**This supersedes D-09, and D-09's reasoning was the root cause of a long chain
+of failures.**
+
+### What actually happened
+
+D-09 chose qwen for stronger Indic coverage. qwen3.6 is a *reasoning* model, so
+D-10 raised `max_tokens` to 4096 to leave room for thinking tokens (a 1024 cap
+truncated output to a bare `{`).
+
+On Groq's free tier, **`max_tokens` counts against the token-per-minute budget
+whether or not the tokens are generated.** Every RAG request therefore billed
+~4096 output tokens on top of a ~2,000-token prompt (five Indic passages).
+The TPM budget was exhausted after roughly ten requests.
+
+That is the "rate limited after ~10 sustained requests" symptom recorded in
+D-18/D-19. It was attributed there to generic free-tier throttling. It was not
+generic — it was a direct, avoidable consequence of pairing a reasoning model
+with a large context on a metered tier.
+
+### Measured, same corpus, same prompts
+
+| | qwen3.6-27b @ 4096 | gpt-oss-20b @ 1024 |
+|---|---|---|
+| Generation latency | 81s, then failed | **0.7 – 1.0s** |
+| Outcome | `RateLimitError`, conf 0.0 | conf **0.95**, 2 real citations |
+| Billed output tokens/req | ~4096 | ~1024 |
+
+The Indic-quality concern that motivated D-09 did not materialise: Hindi and
+Tamil both answered correctly, in the correct script, at 0.95 confidence.
+
+### The diagnostic failure, recorded deliberately
+
+Four fixes were applied before finding this — a Qdrant search retry, a
+`get_client(timeout=)` parameter, rate-limit backoff, then a cap on that
+backoff. Each was a real improvement and all are kept. **None addressed the
+cause.** Every one treated a symptom one layer below a model choice made hours
+earlier.
+
+Two habits would have found it immediately:
+
+1. **Isolate every component before fixing anything.** Timing embed / Qdrant /
+   rerank / Groq separately took ten minutes and immediately showed all four
+   were fast individually — which falsified the infrastructure theories that had
+   already consumed several fix cycles.
+2. **Test the real payload.** Short probe prompts succeeded and made Groq look
+   healthy. The failure only reproduced with a genuine ~2,000-token RAG prompt.
+   A probe that does not resemble production traffic is not a test of production.
+
+### Alternatives
+
+- *Keep qwen, cut `max_tokens`.* Truncates its reasoning; produces the bare-`{`
+  failure from D-10.
+- *Keep qwen, shrink context (top_k 5 → 3).* Reduces prompt tokens but not the
+  4096 output reservation, which is the dominant term.
+- *Paid Groq tier.* Would have hidden the problem rather than fixed it — the
+  request was ~4× larger than it needed to be regardless of tier.
+
+**Revisit.** If Day-3 evaluation shows weak generation on low-resource languages
+(`as`, `or`, `sa`, `ne`), compare `openai/gpt-oss-120b` — but measure tokens per
+request alongside quality, not quality alone.
+
+**Standing rule for this project.** On a metered tier, `max_tokens` is a cost
+parameter, not just a safety limit. Reasoning models multiply that cost even
+when the reasoning is unused.

@@ -21,10 +21,12 @@ class Settings(BaseSettings):
 
     # Groq
     groq_api_key: str = ""
-    groq_model: str = "qwen/qwen3.6-27b"
+    groq_model: str = "openai/gpt-oss-20b"
     # qwen3.6 emits reasoning tokens before the JSON; 1024 truncates it to a
     # bare "{" and burns a retry. 4096 leaves room for both.
-    max_tokens: int = 4096
+    max_tokens: int = 1024
+    # Hard ceiling on any single rate-limit backoff sleep, in seconds.
+    max_backoff_s: float = 10.0
 
     # FastEmbed models
     dense_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"

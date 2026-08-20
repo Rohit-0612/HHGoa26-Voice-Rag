@@ -16,7 +16,7 @@ covering **all 14 Indic languages** (as, bn, gu, hi, kn, ml, mr, ne, or, pa, sa,
 | Sparse | `Qdrant/bm25` (FastEmbed) |
 | Fusion | Server-side RRF |
 | Rerank | `jinaai/jina-reranker-v2-base-multilingual` |
-| LLM | Groq `qwen/qwen3.6-27b`, JSON-mode |
+| LLM | Groq `openai/gpt-oss-20b`, JSON-mode — see D-20 |
 | API | FastAPI (async) |
 
 > Every one of these choices — and the alternatives rejected — is documented in [decision.md](decision.md).

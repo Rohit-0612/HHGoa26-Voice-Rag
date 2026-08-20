@@ -87,8 +87,17 @@ class GroqGenerator:
                 return await self._call(messages, force_json=force_json)
             except RateLimitError as exc:
                 last = exc
-                wait = getattr(getattr(exc, "response", None), "headers", {}) or {}
-                delay = float(wait.get("retry-after", 0) or 0) or min(2 ** attempt, 8)
+                hdrs = getattr(getattr(exc, "response", None), "headers", {}) or {}
+                try:
+                    suggested = float(hdrs.get("retry-after", 0) or 0)
+                except (TypeError, ValueError):
+                    suggested = 0.0
+                # Groq can suggest a wait of minutes-to-hours when a daily quota
+                # is exhausted. Honouring that literally hangs the request (and
+                # every caller behind it) for that long. Cap it: if the real
+                # wait is longer than the cap, we would rather fail fast and
+                # report a rate limit than silently stall.
+                delay = min(suggested or min(2 ** attempt, 8), settings.max_backoff_s)
                 await _a.sleep(delay)
         raise last
 
