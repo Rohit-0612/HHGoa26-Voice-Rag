@@ -18,7 +18,11 @@ from __future__ import annotations
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import asyncio
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src.config import settings
 from src.generation.schemas import (
@@ -78,7 +82,38 @@ async def lifespan(app: FastAPI):
     STATE.clear()
 
 
-app = FastAPI(title="HH Goa 2026 - Multilingual Voice RAG", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="HH Goa 2026 - Multilingual Voice RAG", version="1.0.0", lifespan=lifespan)
+
+# Without this the deployed frontend cannot call the API at all -- the single
+# most common last-mile deployment failure.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=(["*"] if settings.cors_origins.strip() == "*"
+                   else [o.strip() for o in settings.cors_origins.split(",") if o.strip()]),
+    allow_credentials=False,   # cannot be True alongside allow_origins=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# The heavy stages (ONNX embed + cross-encoder) are CPU-bound and run in a
+# threadpool. Unbounded concurrency on a 2 vCPU box means every request gets
+# slower rather than some completing quickly, so admission is bounded and
+# excess load is shed with 429 instead of hanging.
+_SEMAPHORE = asyncio.Semaphore(settings.max_concurrent_requests)
+
+
+class _Busy(Exception):
+    pass
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """Judges poking at the API must never see a stack trace."""
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal error ({type(exc).__name__}). "
+                           f"The service is up; this request failed."},
+    )
 
 
 # --------------------------------------------------------------------------
@@ -214,9 +249,27 @@ async def languages():
     }
 
 
+async def _admit(coro):
+    """Bounded admission: wait for a slot, but shed load rather than hang."""
+    try:
+        await asyncio.wait_for(_SEMAPHORE.acquire(), timeout=settings.queue_timeout_s)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            429, "Server is busy handling other requests. Please retry in a moment."
+        )
+    try:
+        return await coro
+    finally:
+        _SEMAPHORE.release()
+
+
+ALLOWED_AUDIO_EXT = {".wav", ".mp3", ".m4a", ".mp4", ".ogg", ".oga", ".opus",
+                     ".flac", ".webm", ".aac", ".aiff", ".amr", ".wma", ".pcm"}
+
+
 @app.post("/query", response_model=QueryResponse)
 async def query(req: QueryRequest) -> QueryResponse:
-    return await _run_query(req.text, req.language, req.strategy, req.top_k)
+    return await _admit(_run_query(req.text, req.language, req.strategy, req.top_k))
 
 
 @app.post("/query-audio", response_model=QueryResponse)
@@ -232,19 +285,40 @@ async def query_audio(
     if stt is None:
         raise HTTPException(503, "STT disabled -- SARVAM_API_KEY not configured")
 
+    filename = file.filename or "audio.wav"
+    ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
+    if ext and ext not in ALLOWED_AUDIO_EXT:
+        raise HTTPException(
+            415,
+            f"Unsupported file type '{ext}'. Supported: "
+            f"{', '.join(sorted(ALLOWED_AUDIO_EXT))}",
+        )
+
     audio = await file.read()
     if not audio:
         raise HTTPException(400, "Empty audio upload")
 
-    from src.stt.sarvam import STTError
+    # Reject oversize BEFORE spending a Sarvam call on it.
+    size_mb = len(audio) / (1024 * 1024)
+    if size_mb > settings.max_audio_mb:
+        raise HTTPException(
+            413,
+            f"Audio is {size_mb:.1f}MB; the limit is {settings.max_audio_mb:.0f}MB. "
+            f"Sarvam's endpoint also caps at ~{settings.max_audio_seconds:.0f}s of audio, "
+            f"so please send a shorter clip.",
+        )
+
+    from src.stt.sarvam import AudioTooLongError, STTError
 
     try:
         res = await stt.transcribe(
             audio,
-            filename=file.filename or "audio.wav",
+            filename=filename,
             language_hint=language,
             content_type=file.content_type or "audio/wav",
         )
+    except AudioTooLongError as exc:
+        raise HTTPException(413, str(exc)) from exc
     except STTError as exc:
         raise HTTPException(502, f"Transcription failed: {exc}") from exc
 
@@ -256,7 +330,7 @@ async def query_audio(
     # index -- searching all languages beats filtering to the wrong one.
     scoped = language or (res.language if scope_to_detected else None)
 
-    return await _run_query(
+    return await _admit(_run_query(
         res.transcript,
         language=scoped,
         strategy=strategy,
@@ -265,4 +339,4 @@ async def query_audio(
         transcript=res.transcript,
         detected_language=res.language,
         raw_detected_language=res.raw_language,
-    )
+    ))

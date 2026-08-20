@@ -1,0 +1,16 @@
+.venv/
+.git/
+__pycache__/
+**/__pycache__/
+*.pyc
+data/*.pkl
+data/*.jsonl
+data/*.json
+data/audio/
+notebooks/
+tests/
+scripts/
+web/
+.pytest_cache/
+*.md
+!README.md

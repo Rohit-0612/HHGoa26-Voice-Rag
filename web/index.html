@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Multilingual Voice RAG — HH Goa 2026</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>Multilingual Voice RAG</h1>
+  <p class="sub">14 Indic languages · Qdrant hybrid retrieval · Sarvam STT · Groq → NIM fallback</p>
+</header>
+
+<main>
+  <section class="panel">
+    <details id="cfg">
+      <summary>Backend URL <span id="cfgState" class="pill pill-dim">checking…</span></summary>
+      <div class="row">
+        <input id="backendUrl" type="url" placeholder="https://xxx.trycloudflare.com" spellcheck="false">
+        <button id="saveUrl" class="btn btn-ghost">Save &amp; test</button>
+      </div>
+      <p class="hint">The backend runs on a tunnel whose URL rotates. Paste a new one here —
+      no redeploy needed. Saved in your browser.</p>
+    </details>
+  </section>
+
+  <section class="panel ask">
+    <div class="mic-wrap">
+      <button id="mic" class="mic" aria-label="Record a question">
+        <span id="micIcon">🎙</span>
+      </button>
+      <div class="mic-meta">
+        <div id="micLabel">Tap to ask by voice</div>
+        <div id="micTimer" class="timer"></div>
+      </div>
+    </div>
+
+    <div class="divider"><span>or type</span></div>
+
+    <form id="textForm" class="row">
+      <input id="textInput" type="text" placeholder="कॉर्पोरेशन क्या है?  ·  ਕੋਰਪੋਰੇਸ਼ਨ ਕੀ ਹੈ?  ·  ஒரு நிறுவனம் என்பது என்ன?" autocomplete="off">
+      <button type="submit" class="btn">Ask</button>
+    </form>
+    <div class="examples">
+      Try:
+      <button class="chip" data-q="कॉर्पोरेशन क्या है?">हिन्दी</button>
+      <button class="chip" data-q="ਕੋਰਪੋਰੇਸ਼ਨ ਕੀ ਹੈ?">ਪੰਜਾਬੀ</button>
+      <button class="chip" data-q="ஒரு நிறுவனம் என்பது என்ன?">தமிழ்</button>
+      <button class="chip" data-q="কর্পোরেশন কী?">বাংলা</button>
+      <button class="chip chip-warn" data-q="What is the offside rule in football?">off-topic ⚠</button>
+    </div>
+  </section>
+
+  <section id="status" class="panel status hidden"><span class="spinner"></span><span id="statusText"></span></section>
+
+  <section id="result" class="hidden"></section>
+</main>
+
+<footer>
+  <a href="https://github.com/Rohit-0612/HHGoa26-Voice-Rag" target="_blank" rel="noopener">Source</a>
+  <span>·</span><span>MSMARCO-XI · ai4bharat</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

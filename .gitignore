@@ -13,3 +13,9 @@ data/*.parquet
 .ruff_cache/
 models/
 .fastembed_cache/
+
+# Day 3: regenerable artifacts too large for GitHub (100MB limit)
+data/*.pkl
+data/eval_subset.jsonl
+data/eval_gold.json
+data/*.log

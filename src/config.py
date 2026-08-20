@@ -83,6 +83,18 @@ class Settings(BaseSettings):
     # replaces. Both verified. Bias permissive. See D-31.
     relevance_threshold: float = -2.0
 
+    # ---- Deployment (Day 3) ----
+    # Comma-separated origins, or "*". Default is permissive so judges can hit
+    # the API from anywhere; tighten for a real deployment.
+    cors_origins: str = "*"
+    # Measured: 4 concurrent requests on a 2-vCPU box took 96-130s each because
+    # the ONNX reranker is CPU-bound and they thrash. Serialising to 2 keeps
+    # individual latency near the single-request baseline (~3-6s).
+    max_concurrent_requests: int = 2
+    # Shed fast. A judge would rather get "busy, retry" in 12s than a 130s wait.
+    queue_timeout_s: float = 12.0
+    max_audio_seconds: float = 30.0
+
     # ---- Guardrail: post-generation groundedness ----
     groundedness_sentence_threshold: float = 0.35
     groundedness_answer_threshold: float = 0.30

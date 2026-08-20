@@ -62,6 +62,12 @@ class STTError(RuntimeError):
     pass
 
 
+class AudioTooLongError(STTError):
+    """Sarvam rejected the clip for duration. Distinguished from a generic STT
+    failure so the API can answer 413 with a clear message instead of leaking
+    the provider's nested error JSON as a 502."""
+
+
 class SarvamSTT:
     name = "sarvam"
 
@@ -117,7 +123,13 @@ class SarvamSTT:
 
                 # 4xx other than 429 will not improve on retry.
                 if resp.status_code != 429 and resp.status_code < 500:
-                    raise STTError(f"Sarvam {resp.status_code}: {resp.text[:200]}")
+                    body_l = resp.text.lower()
+                    if "duration" in body_l and ("exceed" in body_l or "long" in body_l):
+                        raise AudioTooLongError(
+                            f"Audio is longer than the {settings.max_audio_seconds:.0f}s "
+                            f"limit. Please record a shorter clip."
+                        )
+                    raise STTError(f"Sarvam rejected the audio ({resp.status_code}).")
 
                 last = STTError(f"Sarvam {resp.status_code}: {resp.text[:200]}")
             except (httpx.TimeoutException, httpx.TransportError) as exc:
