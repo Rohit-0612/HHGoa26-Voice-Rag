@@ -63,11 +63,14 @@ class QueryRequest(BaseModel):
 
 
 class Timing(BaseModel):
+    stt_ms: float = 0.0
+    scope_ms: float = 0.0
     embed_ms: float = 0.0
     search_ms: float = 0.0
     rerank_ms: float = 0.0
     retrieval_ms: float = 0.0
     generation_ms: float = 0.0
+    groundedness_ms: float = 0.0
     total_ms: float = 0.0
 
 
@@ -79,6 +82,22 @@ class Citation(BaseModel):
     rerank_score: float | None = None
 
 
+class Groundedness(BaseModel):
+    score: float = 0.0
+    min_sentence_score: float = 0.0
+    kept: int = 0
+    dropped: int = 0
+    replaced: bool = False
+
+
+class ScopeInfo(BaseModel):
+    in_scope: bool = True
+    score: float = 0.0
+    threshold: float = 0.0
+    stage: str = "disabled"
+    reason: str = ""
+
+
 class QueryResponse(BaseModel):
     answer: str
     citations: list[str]
@@ -87,3 +106,10 @@ class QueryResponse(BaseModel):
     contexts: list[Citation] = Field(default_factory=list)
     model: str = ""
     retry_used: bool = False
+    # ---- Day 2 ----
+    provider: str = ""
+    scope: ScopeInfo = Field(default_factory=ScopeInfo)
+    groundedness: Groundedness = Field(default_factory=Groundedness)
+    transcript: str | None = None
+    detected_language: str | None = None
+    raw_detected_language: str | None = None

@@ -40,7 +40,10 @@ Parse error was: {error}"""
 def build_context(chunks) -> str:
     blocks = []
     for i, c in enumerate(chunks, 1):
-        blocks.append(f"[{i}] chunk_id: {c.chunk_id}\nlanguage: {c.language}\n{c.text}")
+        # context_text is the parent window for sentence_window chunks and the
+        # chunk itself for every other strategy.
+        body = getattr(c, "context_text", None) or c.text
+        blocks.append(f"[{i}] chunk_id: {c.chunk_id}\nlanguage: {c.language}\n{body}")
     return "\n\n".join(blocks)
 
 
@@ -169,3 +172,122 @@ class GroqGenerator:
 
         answer = answer.drop_hallucinated_citations(valid_ids)
         return answer, (time.perf_counter() - t0) * 1000, retry_used
+
+
+# ==========================================================================
+# Day 2: provider fallback chain
+# ==========================================================================
+class ChainedGenerator:
+    """Try providers in order, skipping any whose circuit is open.
+
+    The per-provider logic is unchanged from Day 1 -- JSON mode, exactly one
+    stricter retry that drops `response_format` (retrying with the same
+    server-side constraint just reproduces the same 400), citation validation.
+    What is new is that a provider failing outright hands off to the next one
+    instead of degrading to a zero-confidence answer.
+
+    `generate()` keeps the Day 1 signature so the API and existing tests are
+    untouched; `generate_detailed()` exposes which provider actually answered.
+    """
+
+    def __init__(self, providers, breakers=None):
+        from src.generation.breaker import CircuitBreaker
+
+        if not providers:
+            raise RuntimeError("ChainedGenerator needs at least one provider")
+        self.providers = list(providers)
+        self.breakers = breakers or {p.name: CircuitBreaker(p.name) for p in self.providers}
+
+    @property
+    def model(self) -> str:
+        return self.providers[0].model
+
+    async def _call(self, provider, messages, force_json: bool = True) -> str:
+        fn = getattr(provider, "complete_with_backoff", None) or provider.complete
+        return await fn(messages, force_json=force_json)
+
+    async def _try_provider(self, provider, messages, user, valid_ids):
+        """One provider, with its own JSON retry. Raises if it cannot answer."""
+        try:
+            return RAGAnswer(**_extract_json(await self._call(provider, messages))), False
+        except Exception as exc:
+            # Same broad catch as Day 1: provider errors (e.g. Groq's
+            # json_validate_failed) are exactly what this retry is for.
+            retry_messages = messages + [
+                {"role": "system", "content": RETRY_SYSTEM.format(error=str(exc)[:200])}
+            ]
+            raw = await self._call(provider, retry_messages, force_json=False)
+            return RAGAnswer(**_extract_json(raw)), True
+
+    async def generate_detailed(self, question: str, chunks) -> dict:
+        t0 = time.perf_counter()
+        valid_ids = {c.chunk_id for c in chunks}
+        user = f"CONTEXT:\n{build_context(chunks)}\n\nQUESTION: {question}"
+        messages = [{"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": user}]
+
+        errors: list[str] = []
+        skipped: list[str] = []
+
+        for provider in self.providers:
+            breaker = self.breakers.get(provider.name)
+            if breaker is not None and not breaker.allows():
+                skipped.append(provider.name)
+                continue
+
+            try:
+                answer, retry_used = await self._try_provider(provider, messages, user, valid_ids)
+            except Exception as exc:
+                if breaker is not None:
+                    breaker.record_failure()
+                errors.append(f"{provider.name}: {type(exc).__name__}: {str(exc)[:120]}")
+                continue
+
+            if breaker is not None:
+                breaker.record_success()
+            return {
+                "answer": answer.drop_hallucinated_citations(valid_ids),
+                "generation_ms": (time.perf_counter() - t0) * 1000,
+                "retry_used": retry_used,
+                "provider": provider.name,
+                "model": provider.model,
+                "errors": errors,
+                "skipped": skipped,
+            }
+
+        # Every provider failed or was skipped -- degrade, never raise.
+        return {
+            "answer": RAGAnswer(
+                answer="All generation providers are currently unavailable.",
+                citations=[], confidence=0.0,
+            ),
+            "generation_ms": (time.perf_counter() - t0) * 1000,
+            "retry_used": True,
+            "provider": "none",
+            "model": "",
+            "errors": errors,
+            "skipped": skipped,
+        }
+
+    async def generate(self, question: str, chunks):
+        """Day 1 signature: (answer, generation_ms, retry_used)."""
+        r = await self.generate_detailed(question, chunks)
+        return r["answer"], r["generation_ms"], r["retry_used"]
+
+    def breaker_status(self) -> list[dict]:
+        return [b.snapshot() for b in self.breakers.values()]
+
+
+def build_default_chain():
+    """Groq primary, NIM fallback. Missing keys are skipped, not fatal."""
+    from src.generation.providers import GroqProvider, NIMProvider
+
+    providers = []
+    for cls in (GroqProvider, NIMProvider):
+        try:
+            providers.append(cls())
+        except Exception:
+            pass
+    if not providers:
+        raise RuntimeError("No LLM provider configured (need GROQ_API_KEY or NIM_API_KEY)")
+    return ChainedGenerator(providers)

@@ -43,6 +43,44 @@ class Settings(BaseSettings):
     semantic_breakpoint_percentile: float = 90.0
     semantic_min_chars: int = 120
 
+    # Fixed-size chunking (Day 2 baseline)
+    fixed_chunk_chars: int = 400
+    fixed_overlap_chars: int = 80
+
+    # Sentence-window / parent-child chunking (Day 2)
+    window_size: int = 1  # +/- N sentences carried as parent context
+
+    # ---- Sarvam STT (Day 2) ----
+    sarvam_api_key: str = ""
+    sarvam_stt_url: str = "https://api.sarvam.ai/speech-to-text"
+    sarvam_model: str = "saaras:v3"
+    # Sarvam's REST endpoint caps at 30s of audio per request.
+    max_audio_mb: float = 20.0
+    stt_retries: int = 3
+
+    # ---- NVIDIA NIM fallback (Day 2) ----
+    nim_api_key: str = ""
+    nim_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nim_model: str = "nvidia/nvidia-nemotron-nano-9b-v2"
+
+    # ---- Circuit breaker ----
+    breaker_failure_threshold: int = 3
+    breaker_reset_s: float = 60.0
+
+    # ---- Guardrail: pre-retrieval scope ----
+    centroid_k: int = 16
+    scope_percentile: float = 5.0
+    # Pre-retrieval centroid guard is measured-weak (D-24); default it permissive
+    # so it only catches egregious garbage, and rely on relevance_threshold.
+    scope_threshold: float | None = 0.15
+    # Post-retrieval cross-encoder gate. In-corpus min was +0.452, off-topic max
+    # -0.309, so 0.0 sits in the measured gap.
+    relevance_threshold: float = 0.0
+
+    # ---- Guardrail: post-generation groundedness ----
+    groundedness_sentence_threshold: float = 0.35
+    groundedness_answer_threshold: float = 0.30
+
     @property
     def passages_path(self) -> Path:
         return DATA_DIR / "passages.jsonl"
@@ -50,6 +88,10 @@ class Settings(BaseSettings):
     @property
     def smoke_results_path(self) -> Path:
         return DATA_DIR / "smoke_results.json"
+
+    @property
+    def centroids_path(self) -> Path:
+        return DATA_DIR / "centroids.npz"
 
 
 settings = Settings()

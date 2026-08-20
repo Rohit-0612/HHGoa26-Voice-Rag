@@ -95,6 +95,12 @@ def build_points(
             "passage_id": chunk.source_passage_id,
             **(extra[i] if extra else {}),
         }
+        # sentence_window embeds a single sentence but the LLM must read the
+        # surrounding window, so the parent travels in the payload. Retrieval
+        # matches on the child vector; generation gets the parent text.
+        parent = chunk.meta.get("parent_text")
+        if parent and parent != chunk.text:
+            payload["parent_text"] = parent
         points.append(
             models.PointStruct(
                 id=point_id(chunk.chunk_id),

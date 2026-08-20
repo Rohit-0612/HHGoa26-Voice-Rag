@@ -23,6 +23,16 @@ class RetrievedChunk:
     strategy: str
     fusion_score: float
     rerank_score: float | None = None
+    # sentence_window: the +/-N sentence window this child sentence came from.
+    # Empty for every other strategy.
+    parent_text: str = ""
+
+    @property
+    def context_text(self) -> str:
+        """What the LLM should read. For sentence_window that is the parent
+        window, not the single embedded sentence -- the retrieval unit and the
+        generation unit are deliberately different (see chunking.py)."""
+        return self.parent_text or self.text
 
 
 @dataclass
@@ -84,6 +94,7 @@ class HybridRetriever:
                 language=p.payload.get("language", ""),
                 strategy=p.payload.get("strategy", ""),
                 fusion_score=float(p.score),
+                parent_text=p.payload.get("parent_text", "") or "",
             )
             for p in resp.points
         ]
@@ -107,7 +118,7 @@ class HybridRetriever:
             return chunks, 0.0
         t0 = time.perf_counter()
         if self.reranker is not None:
-            scores = list(self.reranker.rerank(query, [c.text for c in chunks]))
+            scores = list(self.reranker.rerank(query, [c.context_text for c in chunks]))
             for chunk, score in zip(chunks, scores):
                 chunk.rerank_score = float(score)
             chunks.sort(key=lambda c: c.rerank_score, reverse=True)

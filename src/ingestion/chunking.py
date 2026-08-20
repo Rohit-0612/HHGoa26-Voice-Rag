@@ -180,3 +180,115 @@ class SemanticChunking(ChunkingStrategy):
         if current:
             groups.append(current)
         return groups
+
+
+# --------------------------------------------------------------------------
+# Strategy (c): fixed size with overlap  -- Day 2
+# --------------------------------------------------------------------------
+@register
+class FixedSizeChunking(ChunkingStrategy):
+    """Fixed character window with overlap. The deliberately dumb baseline.
+
+    Included so the other three strategies have something to beat. If a
+    semantic or structural strategy cannot outperform blind character windows,
+    its extra complexity is not earning its place.
+
+    Windows are snapped forward to the nearest sentence boundary when one falls
+    inside a tolerance band, which avoids slicing mid-word in scripts without
+    spaces between all tokens (Malayalam, Tamil) while keeping sizes roughly
+    fixed. Overlap exists so an answer spanning a boundary survives in at least
+    one chunk.
+    """
+
+    name = "fixed_size"
+
+    def __init__(self, chunk_chars: int = 400, overlap_chars: int = 80, snap_window: int = 60):
+        if overlap_chars >= chunk_chars:
+            raise ValueError("overlap_chars must be smaller than chunk_chars")
+        self.chunk_chars = chunk_chars
+        self.overlap_chars = overlap_chars
+        self.snap_window = snap_window
+
+    def _snap(self, text: str, end: int) -> int:
+        """Nudge a cut point to a sentence terminator within tolerance."""
+        if end >= len(text):
+            return len(text)
+        window = text[end : end + self.snap_window]
+        for i, ch in enumerate(window):
+            if ch in "।॥۔.!?":
+                return end + i + 1
+        return end
+
+    def chunk(self, text: str, *, language: str, passage_id: str) -> list[Chunk]:
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        chunks: list[Chunk] = []
+        start, idx = 0, 0
+        step = self.chunk_chars - self.overlap_chars
+
+        while start < len(text):
+            end = self._snap(text, min(start + self.chunk_chars, len(text)))
+            piece = text[start:end].strip()
+            if piece:
+                chunks.append(
+                    self._mk(piece, language, passage_id, idx,
+                             n_chars=len(piece), start=start, end=end)
+                )
+                idx += 1
+            if end >= len(text):
+                break
+            start += step
+
+        return chunks or [self._mk(text, language, passage_id, 0, n_chars=len(text))]
+
+
+# --------------------------------------------------------------------------
+# Strategy (d): sentence-window / parent-child  -- Day 2
+# --------------------------------------------------------------------------
+@register
+class SentenceWindowChunking(ChunkingStrategy):
+    """Embed one sentence, but carry its neighbours as context.
+
+    The retrieval unit and the generation unit are different things, and this
+    strategy separates them. A single sentence embeds to a tight, unambiguous
+    vector -- good for matching a specific question -- but a sentence alone is
+    usually too thin to answer from. So the *child* (one sentence) is what gets
+    embedded and matched, while `meta["parent_text"]` carries a +/-N sentence
+    window that is what the LLM should actually read.
+
+    Cost: this is the most expensive strategy to index, roughly one chunk per
+    sentence (~4x passage-native on this corpus). That expense is the thing the
+    recall@5 eval has to justify.
+    """
+
+    name = "sentence_window"
+
+    def __init__(self, window_size: int = 1):
+        self.window_size = window_size
+
+    def chunk(self, text: str, *, language: str, passage_id: str) -> list[Chunk]:
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        sentences = split_sentences(text)
+        if len(sentences) <= 1:
+            return [self._mk(text, language, passage_id, 0,
+                             parent_text=text, n_sentences=len(sentences))]
+
+        chunks = []
+        for i, sentence in enumerate(sentences):
+            lo = max(0, i - self.window_size)
+            hi = min(len(sentences), i + self.window_size + 1)
+            chunks.append(
+                self._mk(
+                    sentence, language, passage_id, i,
+                    # The LLM reads this; the embedding is of `sentence` alone.
+                    parent_text=" ".join(sentences[lo:hi]),
+                    window=[lo, hi],
+                    n_sentences=len(sentences),
+                )
+            )
+        return chunks
