@@ -1,0 +1,15 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+data/*.jsonl
+data/*.json
+data/*.parquet
+*.parquet
+.DS_Store
+.ruff_cache/
+models/
+.fastembed_cache/
