@@ -70,7 +70,8 @@ async function testBackend() {
   }
   setCfgState("checking…", "pill-dim");
   try {
-    const r = await fetch(backend.replace(/\/$/, "") + "/health", { mode: "cors" });
+    const r = await fetch(backend.replace(/\/$/, "") + "/health",
+                          { mode: "cors", headers: { "ngrok-skip-browser-warning": "1" } });
     const d = await r.json();
     if (d.status === "ok" || d.status === "degraded") {
       setCfgState(`${d.status} · ${(d.points ?? 0).toLocaleString()} chunks`, "pill-ok");
@@ -197,7 +198,10 @@ async function send(path, opts, statusMsg) {
   busy = true;
   showStatus(statusMsg);
   try {
-    const r = await fetch(backend.replace(/\/$/, "") + path, { mode: "cors", ...opts });
+    // ngrok's free tier serves an HTML interstitial unless this header is
+    // present, which would otherwise make every API call fail to parse.
+    const headers = { "ngrok-skip-browser-warning": "1", ...(opts.headers || {}) };
+    const r = await fetch(backend.replace(/\/$/, "") + path, { mode: "cors", ...opts, headers });
     let d = null;
     try { d = await r.json(); } catch { /* non-JSON error page */ }
     if (!r.ok) {
