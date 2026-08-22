@@ -1,0 +1,21 @@
+# Runtime-only dependencies for serving the API.
+#
+# Deliberately EXCLUDES datasets, pyarrow, huggingface-hub and matplotlib:
+# those are only needed to BUILD the index or draw the benchmark chart, and on
+# Colab/Kaggle installing them forces a numpy+pyarrow upgrade that breaks the
+# running session until a runtime restart. Verified: src/api/main.py imports
+# cleanly with all three absent (datasets is a lazy in-function import).
+#
+# Use requirements.txt instead if you need to rebuild the index.
+
+qdrant-client[fastembed]>=1.12.0   # brings fastembed + onnxruntime + hf-hub
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+groq>=0.13.0
+openai>=1.50.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+python-dotenv>=1.0.0
+numpy>=1.26.0
