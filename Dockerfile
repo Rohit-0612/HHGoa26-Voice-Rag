@@ -19,10 +19,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
-COPY src ./src
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-RUN pip install --upgrade pip && pip install .
+COPY src ./src
 
 # Bake the ONNX weights into the image. Without this the FIRST request pays a
 # ~2 minute download, which is exactly when a judge is watching.

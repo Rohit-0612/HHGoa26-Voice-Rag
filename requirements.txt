@@ -1,0 +1,33 @@
+# Runtime dependencies. Kept in sync with [project.dependencies] in pyproject.toml.
+#
+# This exists alongside pyproject.toml because `pip install .` builds a wheel,
+# which is slower and has more failure modes in throwaway environments like
+# Colab. `pip install -r requirements.txt` from the repo root is enough: the
+# app is run from the repo root, so `src/` is importable without installing.
+
+# --- vector DB + embeddings (ONNX, no torch) ---
+qdrant-client[fastembed]>=1.12.0
+
+# --- dataset loading (only needed to rebuild the index) ---
+datasets>=3.0.0
+pyarrow>=17.0.0
+huggingface-hub>=0.26.0
+
+# --- API ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.9      # multipart/form-data for /query-audio
+httpx>=0.27.0                # Sarvam STT client + test client
+
+# --- LLM providers ---
+groq>=0.13.0                 # primary
+openai>=1.50.0               # NVIDIA NIM is OpenAI-compatible
+
+# --- config + contracts ---
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+python-dotenv>=1.0.0
+
+# --- guardrails + analysis ---
+numpy>=1.26.0                # centroids, groundedness cosine
+matplotlib>=3.9.0            # benchmark chart only

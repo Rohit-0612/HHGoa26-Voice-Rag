@@ -235,7 +235,7 @@ limitations), not to the retrieval logic.
 ```bash
 git clone https://github.com/Rohit-0612/HHGoa26-Voice-Rag.git
 cd HHGoa26-Voice-Rag
-uv venv && uv pip install -e ".[dev]"
+uv venv && uv pip install -r requirements-dev.txt   # or: pip install -r requirements.txt
 cp .env.example .env      # then fill in the keys below
 ```
 
