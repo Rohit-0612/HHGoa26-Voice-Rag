@@ -2,7 +2,19 @@
    tooling and adding a bundler on submission day risks a build failure at the
    worst possible moment. */
 
-const DEFAULT_BACKEND = "http://localhost:8000";
+/* An https page cannot fetch http://localhost -- the browser blocks it as mixed
+   content and reports only "Load failed", which is indistinguishable from the
+   server being down. So only default to localhost when we are ourselves on
+   http; otherwise start empty and make the user set it. */
+const IS_HTTPS = location.protocol === "https:";
+/* When the page is served BY the backend (the normal case now), same-origin is
+   the right default: no CORS, no configuration, nothing for a judge to paste.
+   The field still exists for the Vercel-hosted copy, which must point at a
+   tunnel URL. */
+const SAME_ORIGIN = location.origin;
+const SERVED_BY_BACKEND = !/vercel\.app$|netlify\.app$|github\.io$/.test(location.hostname)
+                          && location.protocol.startsWith("http");
+const DEFAULT_BACKEND = SERVED_BY_BACKEND ? SAME_ORIGIN : (IS_HTTPS ? "" : "http://localhost:8000");
 const MAX_RECORD_MS = 25_000;   // Sarvam's REST endpoint caps at ~30s
 
 const $ = (id) => document.getElementById(id);
@@ -19,6 +31,20 @@ function setCfgState(txt, cls) {
 }
 
 async function testBackend() {
+  if (!backend) {
+    setCfgState("not set — paste your backend URL", "pill-bad");
+    $("cfg").open = true;
+    return false;
+  }
+  if (IS_HTTPS && backend.startsWith("http://")) {
+    setCfgState("blocked: needs https", "pill-bad");
+    $("cfg").open = true;
+    renderError(
+      "This page is served over HTTPS, so the browser blocks requests to an " +
+      "http:// backend (mixed content). Use the https:// tunnel URL instead."
+    );
+    return false;
+  }
   setCfgState("checking…", "pill-dim");
   try {
     const r = await fetch(backend.replace(/\/$/, "") + "/health", { mode: "cors" });
@@ -157,7 +183,13 @@ async function send(path, opts, statusMsg) {
       render(d);
     }
   } catch (e) {
-    renderError(`Could not reach the backend (${e.message}). It may be asleep or the URL may have changed.`);
+    const hint = !backend
+      ? "No backend URL is set — open 'Backend URL' above and paste it."
+      : (IS_HTTPS && backend.startsWith("http://"))
+        ? "The backend URL is http:// but this page is https:// — the browser blocks that. Use the https:// URL."
+        : "The backend may be asleep, or its tunnel URL may have rotated. " +
+          `Open ${backend}/health in a new tab to check.`;
+    renderError(`Could not reach the backend. ${hint}`);
   } finally {
     busy = false;
   }

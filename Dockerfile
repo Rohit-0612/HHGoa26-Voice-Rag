@@ -23,6 +23,7 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY src ./src
+COPY web ./web
 
 # Bake the ONNX weights into the image. Without this the FIRST request pays a
 # ~2 minute download, which is exactly when a judge is watching.

@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import asyncio
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.config import settings
 from src.generation.schemas import (
@@ -340,3 +342,20 @@ async def query_audio(
         detected_language=res.language,
         raw_detected_language=res.raw_language,
     ))
+
+
+# ---------------------------------------------------------------------------
+# Serve the UI from the API itself.
+#
+# The frontend is also deployed to Vercel, but that makes every call
+# cross-origin, and cross-origin requests to a *.trycloudflare.com host are
+# blocked by some ad blockers and privacy extensions -- which surfaces in the
+# browser only as an opaque "Load failed", indistinguishable from the server
+# being down. Serving the page from the same origin as the API removes that
+# entire class of failure: one link, no CORS, nothing to configure.
+#
+# Mounted last so it cannot shadow /query, /health, etc.
+# ---------------------------------------------------------------------------
+_WEB = Path(__file__).resolve().parent.parent.parent / "web"
+if _WEB.is_dir():
+    app.mount("/", StaticFiles(directory=str(_WEB), html=True), name="ui")

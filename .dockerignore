@@ -10,7 +10,6 @@ data/audio/
 notebooks/
 tests/
 scripts/
-web/
 .pytest_cache/
 *.md
 !README.md
