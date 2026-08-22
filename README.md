@@ -194,6 +194,31 @@ The honest finding: **no sophisticated strategy beat the simple ones**, and
 
 ![latency](data/benchmark.png)
 
+### Deployed — 12 queries, 9 languages, 0 failures
+
+Backend on Colab (2 vCPU), Qdrant Cloud in `eu-central-1`, frontend on Vercel.
+
+| Stage | local P50 | **deployed P50** | deployed P100 | delta |
+|---|---|---|---|---|
+| Scope guard | 20 | **51** | 116 | +155% |
+| Query embed | 17 | **52** | 128 | +207% |
+| Qdrant search | 519 | **567** | 608 | **+9%** |
+| Rerank | 2,351 | **8,640** | 18,742 | **+268%** |
+| Generation | 1,056 | **1,015** | 2,423 | **−4%** |
+| Groundedness | 401 | **1,116** | 1,815 | +178% |
+| **End-to-end** | 6,008 | **11,417** | 19,492 | **+90%** |
+
+recall@5 on the deployed backend: **0.62**.
+
+**The deployed slowdown is CPU, not network.** This is worth stating precisely because the
+intuitive explanation is wrong. The two network-bound stages are flat — Qdrant search +9%
+(despite the client being in the US and the cluster in `eu-central-1`) and generation −4%.
+Every CPU-bound stage roughly tripled: rerank +268%, embed +207%, groundedness +178%.
+Colab's 2 shared vCPUs are simply slower than the development machine.
+
+The actionable consequence: moving the Qdrant region would buy almost nothing. Cutting
+rerank candidates from 20 to 10, or hosting on a box with real CPU, is where the time is.
+
 **Only the two cheapest stages meet <200ms, and that is a property of the architecture,
 not a tuning failure.** Generation is a network round trip to a hosted LLM (~71% of total);
 nothing local makes that sub-200ms. A realistic target for voice is *perceived* latency via
