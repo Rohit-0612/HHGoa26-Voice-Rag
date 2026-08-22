@@ -18,11 +18,34 @@ const DEFAULT_BACKEND = SERVED_BY_BACKEND ? SAME_ORIGIN : (IS_HTTPS ? "" : "http
 const MAX_RECORD_MS = 25_000;   // Sarvam's REST endpoint caps at ~30s
 
 const $ = (id) => document.getElementById(id);
-let backend = localStorage.getItem("backendUrl") || DEFAULT_BACKEND;
+/* When the page is served BY the backend, the correct target is ALWAYS this
+   origin -- and a stale localStorage entry (a dead tunnel URL from a previous
+   session) must not override it. That exact bug made a healthy deployment look
+   broken: the page loaded fine from the new origin, then fetched the old dead
+   host saved in localStorage. Only the separately-hosted copy (Vercel) reads
+   the saved value. */
+let backend;
+if (SERVED_BY_BACKEND) {
+  backend = SAME_ORIGIN;
+  const stale = localStorage.getItem("backendUrl");
+  if (stale && stale.replace(/\/$/, "") !== SAME_ORIGIN) {
+    localStorage.removeItem("backendUrl");   // clear it so it cannot resurface
+    console.info("Cleared stale backendUrl:", stale, "-> using", SAME_ORIGIN);
+  }
+} else {
+  backend = localStorage.getItem("backendUrl") || DEFAULT_BACKEND;
+}
 let recorder = null, chunks = [], timerId = null, startedAt = 0, busy = false;
 
 /* ---------------- backend config ---------------- */
 $("backendUrl").value = backend;
+if (SERVED_BY_BACKEND) {
+  // Same-origin: there is nothing to configure. Keep it visible for
+  // transparency but make clear it needs no action.
+  document.querySelector("#cfg summary").innerHTML =
+    'Backend <span id="cfgState" class="pill pill-dim">checking…</span>';
+  $("cfg").open = false;
+}
 
 function setCfgState(txt, cls) {
   const el = $("cfgState");
